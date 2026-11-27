@@ -3,12 +3,16 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub mod live;
 pub mod video;
 pub use video::{
   VideoCapabilities, VideoCodec, VideoInfo, VideoOptions, VideoQuality, VideoRequest, VideoStarted,
 };
 
-pub const VERSION: &str = TAGGED_AGENT_ID_VERSION;
+pub const VERSION: &str = DAEMON_VERSION;
+pub const DAEMON_VERSION: &str = "1.1.19";
+pub const TURN_VERSION: &str = "1.1.18";
+pub const LIVE_VERSION: &str = "1.1.17";
 pub const TAGGED_AGENT_ID_VERSION: &str = "1.1.16";
 pub const ATTRIBUTED_SESSION_VERSION: &str = "1.1.15";
 
@@ -31,6 +35,14 @@ pub fn agent_id_version(id: &str) -> Option<&'static str> {
       .bytes()
       .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
   .then_some(ATTRIBUTED_SESSION_VERSION)
+}
+
+/// Private macOS viewer/capture lease used to bind independently opened channels.
+pub fn valid_capture_lease(lease: &str) -> bool {
+  lease.len() == 32
+    && lease
+      .bytes()
+      .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
 /// IDs accepted by the current agent and its activity journal.

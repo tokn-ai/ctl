@@ -22,6 +22,7 @@ sha2.workspace = true
 wgpu = { version = "30.0.2", default-features = false, features = ["metal", "vulkan", "dx12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+ctream-agent = { path = "../agent" }
 block2 = "0.6.2"
 ctream-driver-capture.workspace = true
 ctream-driver-input.workspace = true

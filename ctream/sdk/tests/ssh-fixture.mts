@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -11,8 +12,46 @@ const changed = join(dir, "changed");
 const log = (event: string) => appendFileSync(join(dir, "lifecycle"), `${process.ppid} ${event}\n`);
 const events = join(dir, "events");
 const tagged = /^exec 'ctream-agent' '1\.1\.16' 'attributed-session' ':2' '([a-z]+#[0-9a-f]{4})' 'x11-7'$/.exec(command);
+const watching = /^exec 'ctream-agent' '1\.1\.17' 'live-room' ':2' '([a-z]+#[0-9a-f]{4})' 'x11-7'$/.exec(command);
+const turns = /^exec 'ctream-agent' '1\.1\.19' '(turn-session|turn-room)' ':2' '([a-z]+#[0-9a-f]{4})' 'x11-7'$/.exec(command);
 
 switch (command) {
+  case turns?.[0]: {
+    assert.ok(turns);
+    log(turns[1]);
+    if (profile === "legacy") {
+      console.error("unsupported control turn protocol");
+      process.exitCode = 1;
+      break;
+    }
+    if (turns[1] === "turn-room") {
+      const participant = {participant_id: "observer", agent_id: turns[2]};
+      console.log(JSON.stringify({type: "snapshot", self_id: "observer", participants: [participant]}));
+      console.log(JSON.stringify({type: "turn", holder: null, expires_at_ms: null}));
+    }
+    for await (const line of createInterface({input: process.stdin})) {
+      assert.equal(turns[1], "turn-session");
+      const request = JSON.parse(line);
+      appendFileSync(events, line + "\n");
+      if (request.operation === "acquire_turn") {
+        console.log(JSON.stringify({ok: true, result: {turn_id: "fixture-turn"}}));
+      } else {
+        assert.equal(request.turn_id, "fixture-turn");
+        const action_id = request.operation === "release_turn" ? undefined : randomUUID();
+        console.log(JSON.stringify({ok: true, result: null, action_id}));
+      }
+    }
+    break;
+  }
+  case watching?.[0]: {
+    assert.ok(watching);
+    const participant = {participant_id: "observer", agent_id: watching[1]};
+    log("watch open");
+    console.log(JSON.stringify({type: "snapshot", self_id: participant.participant_id, participants: [participant]}));
+    for await (const line of createInterface({input: process.stdin})) assert.fail(`unexpected watch input: ${line}`);
+    log("watch close");
+    break;
+  }
   case tagged?.[0]: {
     assert.ok(tagged);
     log("attributed open");

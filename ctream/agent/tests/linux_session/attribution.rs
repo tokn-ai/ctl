@@ -1,4 +1,14 @@
-use super::wait_for;
+#[path = "observer_control.rs"]
+mod observer_control;
+#[path = "semantic_turn.rs"]
+mod semantic_turn;
+#[path = "turns.rs"]
+mod turns;
+
+use super::{
+  host::{HostFixture, TEST_SSH, activity_details},
+  wait_for,
+};
 use ctream_client::{Client, transport::Local};
 use ctream_proto::{Target, WindowId};
 use serde::Deserialize;
@@ -8,8 +18,11 @@ use std::{
   error::Error,
   fs,
   io::{self, BufRead, BufReader, Write},
-  path::{Path, PathBuf},
-  process::{Child, ChildStdout, Command, Stdio},
+  path::Path,
+  process::{Child, Command, Stdio},
+  sync::mpsc,
+  thread,
+  time::Duration,
 };
 use uuid::Uuid;
 use x11rb::{
@@ -25,26 +38,9 @@ use x11rb::{
 const AGENT: &str = env!("CARGO_BIN_EXE_ctream-agent");
 const FIRST_TEXT: &str = "privatecobalt";
 const SECOND_TEXT: &str = "privatelemon";
-// The SSH-compatible launcher receives -T HOST COMMAND. Execute the same
-// generated remote command in the display host's isolated state directory.
-const TEST_SSH: &str = r#"
-set -eu
-test "$#" -eq 3 && test "$1" = -T && test "$2" = fixture-display || exit 2
-export XDG_STATE_HOME="$CTREAM_TEST_HOST_STATE"
-exec sh -c "$3"
-"#;
-
-struct State(PathBuf);
-
-impl Drop for State {
-  fn drop(&mut self) {
-    let _ = fs::remove_dir_all(&self.0);
-  }
-}
-
 struct NamedClient {
   child: Child,
-  output: BufReader<ChildStdout>,
+  output: mpsc::Receiver<io::Result<Value>>,
 }
 
 impl NamedClient {
@@ -53,7 +49,8 @@ impl NamedClient {
     host: &Path,
     target: &str,
     window: &str,
-    agent_id: Option<&str>,
+    command_name: &str,
+    identity: Option<(&str, &str)>,
   ) -> io::Result<Self> {
     let mut command = Command::new(Path::new(AGENT).with_file_name("ctream"));
     command
@@ -72,19 +69,28 @@ impl NamedClient {
         "fixture-ssh",
         "--agent",
         AGENT,
-        "session",
+        command_name,
         target,
         "--window",
         window,
       ]);
-    if let Some(agent_id) = agent_id {
-      command.args(["--protocol", "1.0.3", "--agent-id", agent_id]);
+    if let Some((protocol, agent_id)) = identity {
+      command.args(["--protocol", protocol, "--agent-id", agent_id]);
     }
     let mut child = command
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .spawn()?;
-    let output = BufReader::new(child.stdout.take().unwrap());
+    let reader = BufReader::new(child.stdout.take().unwrap());
+    let (sender, output) = mpsc::channel();
+    thread::spawn(move || {
+      for line in reader.lines() {
+        let event = line.and_then(|line| Ok(serde_json::from_str(&line)?));
+        if sender.send(event).is_err() {
+          break;
+        }
+      }
+    });
     Ok(Self { child, output })
   }
 
@@ -96,9 +102,10 @@ impl NamedClient {
   }
 
   fn receive(&mut self) -> io::Result<Value> {
-    let mut line = String::new();
-    self.output.read_line(&mut line)?;
-    Ok(serde_json::from_str(&line)?)
+    self
+      .output
+      .recv_timeout(Duration::from_secs(10))
+      .map_err(io::Error::other)?
   }
 
   fn close(mut self) -> io::Result<()> {
@@ -145,25 +152,20 @@ fn activity(state: &Path) -> io::Result<Vec<Activity>> {
   Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-#[test]
-#[ignore = "requires the disposable X11 session and sibling CLI in docker/ctream"]
-fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(), Box<dyn Error>> {
-  let state = State(std::env::temp_dir().join(format!("ctream-attribution-{}", Uuid::new_v4())));
-  let host = state.0.join("display-host");
-  let caller_a = state.0.join("caller-a");
-  let caller_b = state.0.join("caller-b");
-  fs::create_dir_all(&caller_a)?;
-  fs::create_dir(&caller_b)?;
-  let display = std::env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
-  let (conn, screen) = x11rb::connect(Some(&display))?;
-  let screen = &conn.setup().roots[screen];
+fn fixture_window(
+  conn: &x11rb::rust_connection::RustConnection,
+  screen: &x11rb::protocol::xproto::Screen,
+  target: Target,
+  x: i16,
+  title: &[u8],
+) -> Result<(u32, String), Box<dyn Error>> {
   let fixture = conn.generate_id()?;
   conn
     .create_window(
       COPY_DEPTH_FROM_PARENT,
       fixture,
       screen.root,
-      20,
+      x,
       30,
       220,
       100,
@@ -181,11 +183,10 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
       fixture,
       AtomEnum::WM_NAME,
       AtomEnum::STRING,
-      b"Ctream named fixture",
+      title,
     )?
     .check()?;
   conn.map_window(fixture)?.check()?;
-  let target = Target::parse(&display)?;
   let client = Client::new(Local {
     agent: AGENT.into(),
   });
@@ -198,8 +199,35 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
     )
   })?
   .id;
-  let mut a = NamedClient::open(&caller_a, &host, &display, &window, None)?;
-  let mut b = NamedClient::open(&caller_b, &host, &display, &window, Some("writer-b"))?;
+  Ok((fixture, window))
+}
+
+#[test]
+#[ignore = "requires the disposable X11 session and sibling CLI in docker/ctream"]
+fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(), Box<dyn Error>> {
+  let fixture = HostFixture::new("attribution")?;
+  let host = fixture.state();
+  let caller_a = fixture.caller("a")?;
+  let caller_b = fixture.caller("b")?;
+  let display = std::env::var("CTREAM_TEST_X11").unwrap_or_else(|_| ":98".into());
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let screen = &conn.setup().roots[screen];
+  let (fixture, window) = fixture_window(
+    &conn,
+    screen,
+    Target::parse(&display)?,
+    20,
+    b"Ctream named fixture",
+  )?;
+  let mut a = NamedClient::open(&caller_a, host, &display, &window, "session", None)?;
+  let mut b = NamedClient::open(
+    &caller_b,
+    host,
+    &display,
+    &window,
+    "session",
+    Some(("1.0.3", "writer-b")),
+  )?;
 
   // Both independently launched clients hold the same live window open.
   for client in [&mut a, &mut b] {
@@ -208,9 +236,43 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
     assert_eq!(reply["result"]["mime_type"], "image/png", "{reply}");
   }
   assert!(
-    activity(&host)?.is_empty(),
+    activity(host)?.is_empty(),
     "observations created mutation records"
   );
+  // Independent SSH viewers join after the writers. Each sees the current
+  // roster and receives the same redacted operations in host broadcast order.
+  let mut observers = Vec::new();
+  for (index, caller) in [&caller_a, &caller_b].into_iter().enumerate() {
+    let mut viewer = NamedClient::open(
+      caller,
+      host,
+      &display,
+      &window,
+      "watch",
+      Some(("1.0.5", "observer")),
+    )?;
+    let snapshot = viewer.receive()?;
+    assert_eq!(snapshot["type"], "snapshot");
+    assert_eq!(
+      snapshot["participants"].as_array().unwrap().len(),
+      3 + index
+    );
+    observers.push(viewer);
+  }
+  assert_eq!(observers[0].receive()?["type"], "joined");
+  a.send(json!({"operation":"click","point":{"x":54,"y":24},"size":[220,100],"button":"left"}))?;
+  assert_eq!(a.receive()?, json!({"ok":true,"result":null}));
+  let click = observers[0].receive()?;
+  assert_eq!(click, observers[1].receive()?);
+  assert_eq!(click["action"]["operation"], "click");
+  for (actual, expected) in click["action"]["point"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .zip([54.5 / 220.0, 24.5 / 100.0])
+  {
+    assert!((actual.as_f64().unwrap() - expected).abs() < 1e-6);
+  }
   // Submit both before waiting on either. The physical event order must agree
   // with the host ledger and each full text action must stay contiguous.
   a.send(json!({"operation":"type_text", "text": FIRST_TEXT}))?;
@@ -218,10 +280,30 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
   for client in [&mut a, &mut b] {
     assert_eq!(client.receive()?, json!({"ok": true, "result": null}));
   }
+  let mut authors = HashSet::new();
+  for _ in 0..2 {
+    let event = observers[0].receive()?;
+    assert_eq!(observers[1].receive()?, event);
+    assert_eq!(event["type"], "action");
+    assert_eq!(event["action"], json!({"operation":"type_text"}));
+    authors.insert(event["participant_id"].as_str().unwrap().to_owned());
+  }
+  assert_eq!(authors.len(), 2);
   a.send(json!({"operation":"click", "point":{"x":220,"y":1}, "size":[220,100], "button":"left"}))?;
   assert_eq!(a.receive()?["ok"], false);
   a.close()?;
   b.close()?;
+  let mut departed = HashSet::new();
+  for _ in 0..2 {
+    let event = observers[0].receive()?;
+    assert_eq!(event, observers[1].receive()?);
+    assert_eq!(event["type"], "left");
+    departed.insert(event["participant_id"].as_str().unwrap().to_owned());
+  }
+  assert_eq!(departed, authors);
+  for viewer in observers {
+    viewer.close()?;
+  }
 
   for caller in [&caller_a, &caller_b] {
     assert!(
@@ -233,8 +315,13 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
       "unexpected caller-local state"
     );
   }
-  let rows = activity(&host)?;
-  assert_eq!(rows.len(), 3);
+  let rows = activity(host)?;
+  assert_eq!(rows.len(), 4);
+  assert_eq!(rows[3].session_id, click["participant_id"]);
+  assert_eq!(
+    (&*rows[3].operation, &*rows[3].status),
+    ("click", "succeeded")
+  );
   let failed = &rows[0];
   assert_eq!((&*failed.operation, &*failed.status), ("click", "failed"));
   let (word, salt) = failed
@@ -254,7 +341,7 @@ fn two_named_clients_attribute_physical_input_to_the_same_window() -> Result<(),
   }
   assert_ne!(rows[1].agent_id, rows[2].agent_id);
   let mut expected = String::new();
-  for row in rows[1..].iter().rev() {
+  for row in rows[1..3].iter().rev() {
     assert_eq!((&*row.operation, &*row.status), ("type_text", "succeeded"));
     match row.agent_id.as_str() {
       generated if generated == failed.agent_id => {

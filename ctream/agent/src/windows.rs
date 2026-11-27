@@ -1,41 +1,49 @@
+use ctream_agent::native_input::{self, Gate, Mode};
 use ctream_agent::{
   capture as catalog,
   protocol::{Request, TargetOperation, parse},
-  runtime::{
-    capture_display, forward_input, forward_window_input, input_capabilities, ping, stream_capture,
-    video_capabilities,
-  },
+  runtime::{input_capabilities, ping, video_capabilities},
 };
-use ctream_driver::{
-  CaptureOptions, CaptureWindow, Driver, ForwardInput, ForwardWindowInput, InputSource, Result,
-};
-use ctream_driver_capture::windows as capture;
+use ctream_driver::{Driver, ForwardInput, ForwardWindowInput, InputSource, Result};
 use ctream_driver_input::windows as input;
-use ctream_proto::{Target, VideoRequest};
+use ctream_proto::Target;
 use std::io;
 
 pub(super) fn run(args: &[String]) -> Result<()> {
   match parse(args)? {
-    Request::AttributedSession {
+    Request::ViewerLane(target, window, lane) => crate::viewer::run(target, window, lane),
+    Request::LiveRoom {
+      turns,
+      authoritative,
       target,
       agent_id,
       window,
-    } => crate::attributed::run(target, agent_id, window),
-    Request::SessionCapture { .. } | Request::SessionInput { .. } => {
+    } => crate::live_room(target, agent_id, window, turns, authoritative),
+    Request::AttributedSession {
+      protocol,
+      target,
+      agent_id,
+      window,
+    } => crate::attributed::serve(target, agent_id, window, protocol),
+    Request::SessionCapture { .. }
+    | Request::SessionInput { .. }
+    | Request::ViewerCapture { .. }
+    | Request::LeasedViewerInput { .. } => {
       Err("window capture leases require a macOS agent".into())
     }
     Request::Ping => ping(),
     Request::InputCapabilities => input_capabilities(io::stdout().lock()),
-    Request::InputSync(Target::Windows(display), None) => {
-      input::Driver.open(&display)?.input()?.run_synchronized()
+    Request::ViewerInput {
+      target,
+      label,
+      window,
+      receipts,
+    } => raw_input(target, window, Some(label), Mode::Viewer { receipts }),
+    Request::InputSync(target, window) => raw_input(target, window, None, Mode::Synchronized),
+    Request::Target(target, TargetOperation::InputWindow(window)) => {
+      raw_input(target, Some(window), None, Mode::Legacy)
     }
-    Request::InputSync(Target::Windows(display), Some(id)) => input::Driver
-      .open(&display)?
-      .input_window(id)?
-      .run_synchronized(),
-    Request::InputSync(Target::WindowsDesktop, Some(id)) => {
-      input::WindowInput::open_desktop(id)?.run_synchronized()
-    }
+    Request::Target(target, TargetOperation::Input) => raw_input(target, None, None, Mode::Legacy),
     Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
@@ -49,13 +57,13 @@ pub(super) fn run(args: &[String]) -> Result<()> {
       target: target @ (Target::Windows(_) | Target::WindowsDesktop),
       driver,
       window,
-    } => capture_selected(target, driver, window, None),
+    } => ctream_agent::daemon::capture_stream(target, driver, window, None, true),
     Request::CaptureVideo {
       target: target @ (Target::Windows(_) | Target::WindowsDesktop),
       driver,
       window,
       request,
-    } => capture_selected(target, driver, window, Some(request)),
+    } => ctream_agent::daemon::capture_stream(target, driver, window, Some(request), true),
     Request::Discover {
       windows_displays: true,
       ..
@@ -68,10 +76,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
       ..
     } => Err("Windows display discovery requires ctream_agent 1.0.5".into()),
     Request::Target(Target::Windows(display), TargetOperation::Capture) => {
-      capture_display(capture::dxgi::Driver, &display)
-    }
-    Request::Target(Target::Windows(display), TargetOperation::Input) => {
-      forward_input(input::Driver, &display)
+      ctream_agent::daemon::capture_stream(Target::Windows(display), "auto", None, None, false)
     }
     Request::Target(
       target @ (Target::Windows(_) | Target::WindowsDesktop),
@@ -86,51 +91,36 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     Request::Target(
       target @ (Target::Windows(_) | Target::WindowsDesktop),
       TargetOperation::CaptureWindow(id),
-    ) => stream_capture(open_window(target, id, None)?),
-    Request::Target(Target::Windows(display), TargetOperation::InputWindow(id)) => {
-      forward_window_input(input::Driver, &display, id)
-    }
-    Request::Target(Target::WindowsDesktop, TargetOperation::InputWindow(id)) => {
-      input::WindowInput::open_desktop(id)?.run()
-    }
+    ) => ctream_agent::daemon::capture_stream(target, "auto", Some(id), None, false),
     _ => Err("this agent supports Windows display and window capture/input".into()),
   }
 }
 
-fn capture_selected(
-  target: Target,
-  driver: &str,
-  window: Option<&str>,
-  video: Option<VideoRequest>,
-) -> Result<()> {
-  let selected = catalog::select(target, driver, window.is_some())?;
-  let options = catalog::options(video.as_ref())?;
-  match (target, selected.id, window) {
-    (Target::Windows(display), "windows.dxgi", None) => {
-      selected.capture_display(capture::dxgi::Driver.open(&display)?, video)
+fn raw_input(target: Target, window: Option<&str>, label: Option<&str>, mode: Mode) -> Result<()> {
+  let Ok(key) = std::env::var("CTREAM_INPUT_DELEGATION") else {
+    let authority = native_input::controller(target, window, label, None)?;
+    return Ok(native_input::serve_controller(
+      mode,
+      authority,
+      None,
+      None,
+      io::BufReader::new(io::stdin().lock()),
+      &mut io::stdout().lock(),
+    )?);
+  };
+  let gate = Gate::delegated(target, window, &key)?;
+  native_input::serve_driver(mode, gate, move |reader, writer| match (target, window) {
+    (Target::Windows(display), None) => input::Driver
+      .open(&display)?
+      .input()?
+      .run_piped(reader, writer),
+    (Target::Windows(display), Some(id)) => input::Driver
+      .open(&display)?
+      .input_window(id)?
+      .run_piped(reader, writer),
+    (Target::WindowsDesktop, Some(id)) => {
+      input::WindowInput::open_desktop(id)?.run_piped(reader, writer)
     }
-    (_, "windows.wgc", Some(id)) => selected.stream(open_window(target, id, options)?, video),
-    _ => Err("capture driver is unavailable for this target".into()),
-  }
-}
-
-fn open_window(
-  target: Target,
-  id: &str,
-  options: Option<CaptureOptions>,
-) -> Result<capture::wgc::WgcCapture> {
-  match target {
-    Target::Windows(display) => {
-      let session = capture::wgc::Driver.open(&display)?;
-      match options {
-        Some(options) => session.capture_window_with_options(id, options),
-        None => session.capture_window(id),
-      }
-    }
-    Target::WindowsDesktop => match options {
-      Some(options) => capture::wgc::WgcCapture::open_desktop_with_options(id, options),
-      None => capture::wgc::WgcCapture::open_desktop(id),
-    },
-    _ => Err("Windows Graphics Capture requires a Windows window".into()),
-  }
+    _ => Err("this agent supports Windows displays and windows".into()),
+  })
 }

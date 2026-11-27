@@ -10,16 +10,42 @@ const SHUTDOWN_MS = 10_000;
 const ABORT_GRACE_MS = 1_000;
 
 export type Request = {operation: string} & Record<string, unknown>;
+
+type Success = {result: unknown; action_id?: string};
+
+export class CtreamActionError extends Error {
+  readonly action_id?: string;
+
+  constructor(message: string, action_id?: string) {
+    super(message);
+    this.name = "CtreamActionError";
+    this.action_id = action_id;
+  }
+}
+
+/** A recoverable host control-turn error. owner_id identifies the current holder when available. */
+export class CtreamTurnError extends CtreamActionError {
+  readonly code: "busy" | "stale_turn";
+  readonly owner_id?: string;
+
+  constructor(message: string, code: "busy" | "stale_turn", owner_id?: string, action_id?: string) {
+    super(message, action_id);
+    this.name = "CtreamTurnError";
+    this.code = code;
+    this.owner_id = owner_id;
+  }
+}
+
 type Child = ChildProcessWithoutNullStreams;
 type Reply = {
-  resolve: (value: unknown) => void;
+  resolve: (value: Success) => void;
   reject: (error: Error) => void;
   limit: number;
   size: number;
   chunks: Buffer[];
 };
 
-function reference(child: Child, method: "ref" | "unref"): void {
+export function reference(child: Child, method: "ref" | "unref"): void {
   // Bun's stdin lacks these methods. Its read pipes and Node's three pipes own handles.
   for (const handle of [child, child.stdin, child.stdout, child.stderr]) {
     (handle as {ref?: () => void; unref?: () => void})[method]?.();
@@ -49,7 +75,7 @@ export class SessionTransport {
   }
 
   /** Build, dispatch and validate one request before admitting the next. */
-  request<T>(request: Request | (() => Request), decode: (value: unknown) => T): Promise<T> {
+  request<T>(request: Request | (() => Request), decode: (value: unknown, action_id?: string) => T): Promise<T> {
     if (this.#closing) return Promise.reject(new Error("ctream session is closed"));
     const run = this.#tail.then(async () => {
       if (this.#failure) throw this.#failure;
@@ -58,7 +84,7 @@ export class SessionTransport {
       if (Buffer.byteLength(payload) > REQUEST_LIMIT) throw new RangeError("ctream request exceeds 64 KiB");
       const reply = await this.#exchange(payload, body.operation === "screenshot" ? SCREENSHOT_LIMIT : JSON_LIMIT);
       try {
-        return decode(reply);
+        return decode(reply.result, reply.action_id);
       } catch (cause) {
         throw this.#fail(cause instanceof Error ? cause : new Error(String(cause)));
       }
@@ -70,6 +96,10 @@ export class SessionTransport {
   close(): Promise<void> {
     this.#closing ??= this.#finish();
     return this.#closing;
+  }
+
+  get closing(): boolean {
+    return this.#closing !== undefined;
   }
 
   async #finish(): Promise<void> {
@@ -137,7 +167,7 @@ export class SessionTransport {
     }
   }
 
-  async #exchange(payload: string, limit: number): Promise<unknown> {
+  async #exchange(payload: string, limit: number): Promise<Success> {
     let child: Child;
     try {
       child = this.#start();
@@ -209,10 +239,22 @@ export class SessionTransport {
     try {
       const bytes = Buffer.concat(pending.chunks, pending.size);
       const envelope = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes));
+      const action_id: unknown = envelope?.action_id;
+      if (action_id !== undefined && (typeof action_id !== "string" ||
+          !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(action_id))) {
+        throw new Error("invalid action ID");
+      }
       if (envelope?.ok === true && Object.hasOwn(envelope, "result")) {
-        pending.resolve(envelope.result);
+        pending.resolve({result: envelope.result, action_id});
       } else if (envelope?.ok === false && typeof envelope.error === "string") {
-        pending.reject(new Error(envelope.error));
+        if (envelope.code === "busy" || envelope.code === "stale_turn") {
+          if (envelope.owner_id !== undefined && typeof envelope.owner_id !== "string") {
+            throw new Error("invalid turn owner ID");
+          }
+          pending.reject(new CtreamTurnError(envelope.error, envelope.code, envelope.owner_id, action_id));
+        } else {
+          pending.reject(new CtreamActionError(envelope.error, action_id));
+        }
       } else {
         throw new Error("unexpected envelope");
       }

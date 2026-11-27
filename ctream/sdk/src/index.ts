@@ -1,12 +1,16 @@
-import type { Request, SessionTransport } from "./session-transport.js";
+import { CtreamTurnError, type Request, type SessionTransport } from "./session-transport.js";
 import { cli, type CtreamOptions } from "./command.js";
+import type { CtreamWatch } from "./watch.js";
 import {
-  displaySession, expectShape, isCapabilities, isElement, isScreenshot, isWindow,
+  displaySession, expectShape, isCapabilities, isElement, isScreenshot, isWindow, record,
   type Button, type Capabilities, type Direction, type DisplaySession, type Element,
   type Point, type Screenshot, type Size, type Window,
 } from "./model.js";
 
 export type { CtreamOptions } from "./command.js";
+export { CtreamTurnError, CtreamActionError } from "./session-transport.js";
+export type { CtreamWatch } from "./watch.js";
+export type { LiveAction, LiveEvent, LiveParticipant } from "./live-event.js";
 export { findText, type TextMatch, type OcrOptions } from "./ocr.js";
 export type {
   Button, Capabilities, Direction, Display, DisplaySession, Element, Point, Screenshot, Size, Window,
@@ -51,7 +55,12 @@ export class Ctream {
 
   /** Bind observation and input to a single display or a discovered window ID. */
   session(target: string, window_id?: string): CtreamSession {
-    return new CtreamSession(this.#cli.session(target, window_id));
+    return new CtreamSession({transport: this.#cli.session(target, window_id), turns: this.#cli.turns});
+  }
+
+  /** Follow live presence and actions. The first read joins as a separate participant. */
+  watch(target: string, window_id?: string): CtreamWatch {
+    return this.#cli.watch(target, window_id);
   }
 }
 
@@ -93,91 +102,158 @@ function chordKeys(keys: string | readonly string[]): string[] {
   return names;
 }
 
-class CtreamSession {
-  readonly #transport: SessionTransport;
-  #last_size?: Size;
+export interface ActionReceipt { readonly action_id: string }
 
-  constructor(transport: SessionTransport) {
-    this.#transport = transport;
+type SessionState = {transport: SessionTransport; turns: boolean; last_size?: Size};
+type TurnScope = {turn_id?: string};
+
+/** Operations bound to one target and, inside withTurn, one control turn. */
+class SessionOperations {
+  readonly #state: SessionState;
+  readonly #scope?: TurnScope;
+
+  constructor(state: SessionState, scope?: TurnScope) {
+    this.#state = state;
+    this.#scope = scope;
   }
 
-  /** Drain admitted requests and release this session's capture and input resources. */
-  close(): Promise<void> {
-    return this.#transport.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
+  #request<T>(request: Request | (() => Request), decode: (value: unknown, action_id?: string) => T, mutates = false): Promise<T> {
+    if (this.#scope) {
+      const id = this.#scope.turn_id;
+      if (!id) return Promise.reject(new CtreamTurnError("this control turn scope has ended", "stale_turn"));
+      if (mutates) {
+        return this.#state.transport.request(() => ({
+          ...(typeof request === "function" ? request() : request), turn_id: id,
+        }), decode);
+      }
+    }
+    return this.#state.transport.request(request, decode);
   }
 
   async capabilities(): Promise<Capabilities> {
-    return this.#transport.request({operation: "capabilities"}, (reply) => {
+    return this.#request({operation: "capabilities"}, (reply) => {
       expectShape(isCapabilities(reply), "session capabilities");
       return reply;
     });
   }
 
   async screenshot(): Promise<Screenshot> {
-    return this.#transport.request({operation: "screenshot"}, (reply) => {
+    return this.#request({operation: "screenshot"}, (reply) => {
       expectShape(isScreenshot(reply), "PNG screenshot");
-      this.#last_size = [reply.width, reply.height];
+      this.#state.last_size = [reply.width, reply.height];
       return reply;
     });
   }
 
-  #act(request: Request | (() => Request)): Promise<void> {
-    return this.#transport.request(request, (reply) => {
+  #act(request: Request | (() => Request)): Promise<ActionReceipt | undefined> {
+    return this.#request(request, (reply, action_id) => {
       expectShape(reply === null, "null after applying the action");
-    });
+      expectShape(!this.#state.turns || action_id !== undefined, "action ID from the desktop daemon");
+      return action_id ? {action_id} : undefined;
+    }, true);
   }
 
-  #pointer(action: Request, size?: Size): Promise<void> {
+  #pointer(action: Request, size?: Size): Promise<ActionReceipt | undefined> {
     const explicit: Size | undefined = size && [size[0], size[1]];
     return this.#act(() => {
-      const dimensions = explicit ?? this.#last_size;
+      const dimensions = explicit ?? this.#state.last_size;
       if (!dimensions) throw new Error("call screenshot() on this session first or supply its image size");
       return {...action, size: dimensions};
     });
   }
 
-  async move(point: Point, size?: Size): Promise<void> {
-    await this.#pointer({operation: "move", point: coordinates(point)}, size);
+  async move(point: Point, size?: Size): Promise<ActionReceipt | undefined> {
+    return this.#pointer({operation: "move", point: coordinates(point)}, size);
   }
 
-  async click(point: Point, {button = "left", size}: PointerOptions = {}): Promise<void> {
-    await this.#pointer({operation: "click", point: coordinates(point), button}, size);
+  async click(point: Point, {button = "left", size}: PointerOptions = {}): Promise<ActionReceipt | undefined> {
+    return this.#pointer({operation: "click", point: coordinates(point), button}, size);
   }
 
-  async drag(from: Point, to: Point, {button = "left", size}: PointerOptions = {}): Promise<void> {
-    await this.#pointer({operation: "drag", from: coordinates(from), to: coordinates(to), button}, size);
+  async drag(from: Point, to: Point, {button = "left", size}: PointerOptions = {}): Promise<ActionReceipt | undefined> {
+    return this.#pointer({operation: "drag", from: coordinates(from), to: coordinates(to), button}, size);
   }
 
-  async scroll(point: Point, direction: Direction, {steps = 1, size}: {steps?: number; size?: Size} = {}): Promise<void> {
-    await this.#pointer({operation: "scroll", point: coordinates(point), direction, steps}, size);
+  async scroll(point: Point, direction: Direction, {steps = 1, size}: {steps?: number; size?: Size} = {}): Promise<ActionReceipt | undefined> {
+    return this.#pointer({operation: "scroll", point: coordinates(point), direction, steps}, size);
   }
 
   /** A simultaneous chord such as "cmd+a" or "cmd++" (US physical keys). */
-  async pressKeys(keys: string | readonly string[]): Promise<void> {
-    await this.#act({operation: "press_keys", keys: chordKeys(keys)});
+  async pressKeys(keys: string | readonly string[]): Promise<ActionReceipt | undefined> {
+    return this.#act({operation: "press_keys", keys: chordKeys(keys)});
   }
 
-  async typeText(text: string): Promise<void> {
-    await this.#act({operation: "type_text", text});
+  async typeText(text: string): Promise<ActionReceipt | undefined> {
+    return this.#act({operation: "type_text", text});
   }
 
   async elements(): Promise<Element[]> {
-    return this.#transport.request({operation: "elements"}, (reply) => {
+    return this.#request({operation: "elements"}, (reply) => {
       expectShape(Array.isArray(reply) && reply.every(isElement), "element list");
       return reply;
     });
   }
 
-  async invoke(path: string, index: number, name: string): Promise<void> {
-    await this.#act({operation: "invoke", path, index, name});
+  async invoke(path: string, index: number, name: string): Promise<ActionReceipt | undefined> {
+    return this.#act({operation: "invoke", path, index, name});
   }
 
-  async setText(path: string, text: string): Promise<void> {
-    await this.#act({operation: "set_text", path, text});
+  async setText(path: string, text: string): Promise<ActionReceipt | undefined> {
+    return this.#act({operation: "set_text", path, text});
+  }
+}
+
+export type CtreamTurn = SessionOperations;
+
+class CtreamSession extends SessionOperations {
+  readonly #state: SessionState;
+
+  constructor(state: SessionState) {
+    super(state);
+    this.#state = state;
+  }
+
+  /** Run reads and mutations while holding the display host's control turn. */
+  async withTurn<T>(callback: (turn: CtreamTurn) => T | PromiseLike<T>, {ttl_ms}: {ttl_ms?: number} = {}): Promise<T> {
+    if (!this.#state.turns) throw new Error("construct Ctream with {turns: true} to acquire a control turn");
+    if (typeof callback !== "function") throw new TypeError("withTurn requires a callback");
+    if (ttl_ms !== undefined && (!Number.isSafeInteger(ttl_ms) || ttl_ms < 1 || ttl_ms > 30_000)) {
+      throw new RangeError("ttl_ms must be an integer from 1 to 30000");
+    }
+    const transport = this.#state.transport;
+    const turn_id = await transport.request({operation: "acquire_turn", ttl_ms}, (reply) => {
+      expectShape(record(reply) && typeof reply.turn_id === "string" && reply.turn_id.length > 0, "control turn ID");
+      return reply.turn_id;
+    });
+    // EOF releases even a grant that arrived after the caller requested close.
+    if (transport.closing) throw new Error("ctream session closed while acquiring a control turn");
+    const scope: TurnScope = {turn_id};
+    let completed = false;
+    try {
+      const value = callback(new SessionOperations(this.#state, scope));
+      // Revoke a synchronous callback's handle before queued microtasks can use it.
+      const result = value != null && typeof (value as PromiseLike<T>).then === "function" ? await value : value;
+      completed = true;
+      return result;
+    } finally {
+      scope.turn_id = undefined;
+      const release = transport.request({operation: "release_turn", turn_id}, (reply) => {
+        expectShape(reply === null, "null after releasing the control turn");
+      });
+      // Keep the callback's actionable error if a failed or expired connection
+      // also rejects release. A successful callback still reports a failed release.
+      if (completed) await release;
+      else await release.catch(() => {});
+    }
+  }
+
+  /** Drain admitted requests and release this session's capture and input resources. */
+  close(): Promise<void> {
+    return this.#state.transport.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
   }
 }
 

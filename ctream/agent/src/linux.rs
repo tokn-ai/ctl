@@ -1,44 +1,49 @@
+use ctream_agent::native_input::{self, Gate, Mode};
 use ctream_agent::protocol::{Request, TargetOperation, parse};
 use ctream_agent::{
   capture as catalog,
-  runtime::{
-    capture_display, capture_window, forward_input, forward_window_input, input_capabilities, ping,
-    video_capabilities,
-  },
+  runtime::{input_capabilities, ping, video_capabilities},
 };
 use ctream_driver::{ControlSource, Driver, ForwardInput, ForwardWindowInput, InputSource, Result};
-use ctream_driver_capture::linux as capture;
 use ctream_driver_input::linux as input;
-use ctream_proto::{Target, VideoRequest};
-use std::io;
+use ctream_proto::Target;
+use std::io::{self, Read, Write};
 
 pub(super) fn run(args: &[String]) -> Result<()> {
   match parse(args)? {
-    Request::AttributedSession {
+    Request::ViewerLane(target, window, lane) => crate::viewer::run(target, window, lane),
+    Request::LiveRoom {
+      turns,
+      authoritative,
       target,
       agent_id,
       window,
-    } => crate::attributed::run(target, agent_id, window),
-    Request::SessionCapture { .. } | Request::SessionInput { .. } => {
+    } => crate::live_room(target, agent_id, window, turns, authoritative),
+    Request::AttributedSession {
+      protocol,
+      target,
+      agent_id,
+      window,
+    } => crate::attributed::serve(target, agent_id, window, protocol),
+    Request::SessionCapture { .. }
+    | Request::SessionInput { .. }
+    | Request::ViewerCapture { .. }
+    | Request::LeasedViewerInput { .. } => {
       Err("window capture leases require a macOS agent".into())
     }
     Request::Ping => ping(),
     Request::InputCapabilities => input_capabilities(io::stdout().lock()),
-    Request::InputSync(target, window) => match (target, window) {
-      (Target::X11(display), None) => input::x11::Driver
-        .open(&display)?
-        .input()?
-        .run_synchronized(),
-      (Target::X11(display), Some(id)) => input::x11::Driver
-        .open(&display)?
-        .input_window(id)?
-        .run_synchronized(),
-      (Target::Wayland(display), None) => input::wayland::Driver
-        .open(&display)?
-        .input()?
-        .run_synchronized(),
-      _ => Err("this agent supports Linux displays and X11 window input".into()),
-    },
+    Request::ViewerInput {
+      target,
+      label,
+      window,
+      receipts,
+    } => raw_input(target, window, Some(label), Mode::Viewer { receipts }),
+    Request::InputSync(target, window) => raw_input(target, window, None, Mode::Synchronized),
+    Request::Target(target, TargetOperation::InputWindow(window)) => {
+      raw_input(target, Some(window), None, Mode::Legacy)
+    }
+    Request::Target(target, TargetOperation::Input) => raw_input(target, None, None, Mode::Legacy),
     Request::VideoCapabilities => video_capabilities(io::stdout().lock()),
     Request::CaptureCatalog { .. } => {
       serde_json::to_writer(io::stdout().lock(), &catalog::catalog())?;
@@ -53,13 +58,13 @@ pub(super) fn run(args: &[String]) -> Result<()> {
       target,
       driver,
       window,
-    } => capture_selected(target, driver, window, None),
+    } => ctream_agent::daemon::capture_stream(target, driver, window, None, true),
     Request::CaptureVideo {
       target,
       driver,
       window,
       request,
-    } => capture_selected(target, driver, window, Some(request)),
+    } => ctream_agent::daemon::capture_stream(target, driver, window, Some(request), true),
     Request::Discover { .. } => {
       serde_json::to_writer(io::stdout().lock(), &ctream_platform::discover_sessions()?)?;
       Ok(())
@@ -69,12 +74,6 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         Err("Windows targets require a native Windows agent".into())
       }
       (Target::MacosDesktop, _) => Err("macOS targets require a native macOS agent".into()),
-      (Target::X11(display), TargetOperation::InputWindow(id)) => {
-        forward_window_input(input::x11::Driver, &display, id)
-      }
-      (Target::Wayland(_), TargetOperation::InputWindow(_)) => {
-        Err("pointer and keyboard input are unavailable for Wayland windows".into())
-      }
       (target, TargetOperation::Windows) => {
         serde_json::to_writer(
           io::stdout().lock(),
@@ -82,25 +81,17 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         )?;
         Ok(())
       }
-      (Target::X11(display), TargetOperation::Capture) => {
-        capture_display(capture::x11::ffmpeg::Driver, &display)
+      (target, TargetOperation::Capture) => {
+        ctream_agent::daemon::capture_stream(target, "auto", None, None, false)
       }
-      (Target::Wayland(display), TargetOperation::Capture) => {
-        capture_display(capture::wayland::grim::Driver, &display)
+      (target, TargetOperation::CaptureWindow(id)) => {
+        ctream_agent::daemon::capture_stream(target, "auto", Some(id), None, false)
       }
-      (Target::X11(display), TargetOperation::CaptureWindow(id)) => {
-        capture_window(capture::x11::composite::Driver, &display, id)
-      }
-      (Target::Wayland(display), TargetOperation::CaptureWindow(id)) => {
-        capture_window(capture::wayland::image_copy::Driver, &display, id)
-      }
-      (Target::X11(display), TargetOperation::Input) => forward_input(input::x11::Driver, &display),
-      (Target::Wayland(display), TargetOperation::Input) => {
-        forward_input(input::wayland::Driver, &display)
-      }
+      (_, TargetOperation::Input | TargetOperation::InputWindow(_)) => unreachable!(),
     },
-    Request::Controls(target, id, operation) => {
-      ctream_platform::controls::resolve(target, id)?.run(operation)
+    Request::Controls(target, id, ctream_driver::ControlOperation::Act) => semantic(target, id),
+    Request::Controls(target, id, inspect) => {
+      ctream_platform::controls::resolve(target, id)?.run(inspect)
     }
   }
 }
@@ -115,29 +106,96 @@ fn check_capture_target(target: Target) -> Result<()> {
   }
 }
 
-fn capture_selected(
-  target: Target,
-  driver: &str,
-  window: Option<&str>,
-  video: Option<VideoRequest>,
-) -> Result<()> {
-  check_capture_target(target)?;
-  let selected = catalog::select(target, driver, window.is_some())?;
-  match (target, selected.id, window) {
-    (Target::X11(display), "linux.x11.ffmpeg", None) => {
-      selected.capture_display(capture::x11::ffmpeg::Driver.open(&display)?, video)
+fn raw_input(target: Target, window: Option<&str>, label: Option<&str>, mode: Mode) -> Result<()> {
+  let Ok(key) = std::env::var("CTREAM_INPUT_DELEGATION") else {
+    let authority = native_input::controller(target, window, label, None)?;
+    return Ok(native_input::serve_controller(
+      mode,
+      authority,
+      None,
+      None,
+      io::BufReader::new(io::stdin().lock()),
+      &mut io::stdout().lock(),
+    )?);
+  };
+  let mut gate = Gate::delegated(target, window, &key)?;
+  let mut external = match (target, window) {
+    (Target::X11(display), None) => input::x11::Driver.open(&display)?.input()?,
+    (Target::Wayland(display), None) => input::wayland::Driver.open(&display)?.input()?,
+    (Target::X11(display), Some(id)) => {
+      return native_input::serve_driver(mode, gate, move |reader, writer| {
+        input::x11::Driver
+          .open(&display)?
+          .input_window(id)?
+          .run_piped(reader, writer)
+      });
     }
-    (Target::X11(display), "linux.x11.composite", Some(id)) => {
-      selected.capture_window(capture::x11::composite::Driver.open(&display)?, id, video)
-    }
-    (Target::Wayland(display), "linux.wayland.grim", None) => {
-      selected.capture_display(capture::wayland::grim::Driver.open(&display)?, video)
-    }
-    (Target::Wayland(display), "linux.wayland.image_copy", Some(id)) => selected.capture_window(
-      capture::wayland::image_copy::Driver.open(&display)?,
-      id,
-      video,
-    ),
-    _ => Err("capture driver is unavailable for this target".into()),
+    _ => return Err("this agent supports Linux displays and X11 window input".into()),
+  };
+  gate.helper_guard()?.prepare(&mut external.0)?;
+  native_input::serve_driver(mode, gate, move |reader, writer| {
+    external.run_piped(reader, writer)
+  })
+}
+
+fn semantic(target: Target, id: &str) -> Result<()> {
+  use ctream_agent::{daemon::Authority, desktop_input::InputRequest};
+  use ctream_client::sdk::{Mutation, SemanticRefusal};
+  use ctream_proto::{Action, ActionResult};
+  let mut payload = Vec::new();
+  io::stdin().lock().take(65537).read_to_end(&mut payload)?;
+  if payload.len() > 65536 {
+    return Err("semantic action exceeds size limit".into());
   }
+  let action: Action = serde_json::from_slice(&payload)?;
+  let Ok(key) = std::env::var("CTREAM_INPUT_DELEGATION") else {
+    let label = ctream_client::generate_agent_id();
+    let participant_id = uuid::Uuid::new_v4().to_string();
+    let mut authority = Authority::connect(target, Some(id), &label, &participant_id)?;
+    let action = match action {
+      Action::Invoke { path, index, name } => Mutation::Invoke { path, index, name },
+      Action::SetText { path, text } => Mutation::SetText { path, text },
+    };
+    let result = match authority.execute(None, InputRequest::Sdk { action }) {
+      Ok(_) => ActionResult {
+        applied: true,
+        error: None,
+      },
+      Err(error) => {
+        let cause = error
+          .get_ref()
+          .and_then(|cause| cause.downcast_ref::<ctream_proto::live::ActionFailure>())
+          .map(|failure| &failure.source)
+          .unwrap_or(&error);
+        match cause
+          .get_ref()
+          .and_then(|cause| cause.downcast_ref::<SemanticRefusal>())
+        {
+          Some(reason) => ActionResult {
+            applied: false,
+            error: Some(reason.0.clone()),
+          },
+          None => return Err(error.into()),
+        }
+      }
+    };
+    serde_json::to_writer(io::stdout().lock(), &result)?;
+    return Ok(());
+  };
+  let native = ctream_platform::controls::resolve(target, id)?;
+  let mut gate = Gate::delegated(target, Some(id), &key)?;
+  let mut reply = Vec::new();
+  let guard = gate.helper_guard()?;
+  gate.semantic(|| {
+    reply = native.apply(&payload, |command| guard.prepare(command))?;
+    serde_json::from_slice::<ActionResult>(&reply).map_err(|_| {
+      ctream_driver::UnconfirmedDelivery::error(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "semantic driver returned an invalid outcome",
+      ))
+    })?;
+    Ok(())
+  })?;
+  io::stdout().write_all(&reply)?;
+  Ok(())
 }

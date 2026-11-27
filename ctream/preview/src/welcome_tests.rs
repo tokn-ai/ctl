@@ -156,6 +156,7 @@ impl Gate {
 
 #[derive(Default)]
 struct Config {
+  live: bool,
   legacy: bool,
   desktop_windows: bool,
   per_target_catalog_only: bool,
@@ -199,7 +200,7 @@ impl Mock {
       .filter(|record| {
         matches!(
           record.operation(),
-          "capture" | "capture-window" | "capture-with-driver"
+          "capture" | "capture-window" | "capture-with-driver" | "viewer-capture"
         )
       })
       .cloned()
@@ -213,7 +214,12 @@ impl Mock {
       .lock()
       .unwrap()
       .iter()
-      .filter(|record| matches!(record.operation(), "input" | "input-window"))
+      .filter(|record| {
+        matches!(
+          record.operation(),
+          "input" | "input-window" | "viewer-input"
+        )
+      })
       .cloned()
       .collect()
   }
@@ -285,6 +291,20 @@ impl Transport for Mock {
         },
         true,
       ),
+      "live-room" if config.live => {
+        let snapshot = serde_json::json!({"type":"snapshot","self_id":"preview",
+          "participants":[{"participant_id":"preview","agent_id":arguments[3]},
+                          {"participant_id":"remote","agent_id":"agent-one"}]});
+        (format!("{snapshot}\n").into_bytes(), false)
+      }
+      "viewer-input" if target == "macos" && arguments.len() == 6 => (b"ready\n".to_vec(), false),
+      "viewer-capture" if target == "macos" => (
+        b"{\"driver\":\"macos.screencapturekit\",\"format\":{\"type\":\"ppm\"}}\n".to_vec(),
+        false,
+      ),
+      "viewer-observe" | "turn-room" | "viewer-input" => {
+        return Err(io::Error::other("usage: ctream-agent VERSION OPERATION"));
+      }
       "input" | "input-window" => (
         if config.wait_input {
           Vec::new()
@@ -316,7 +336,7 @@ impl Transport for Mock {
     };
     if matches!(
       operation,
-      "capture" | "capture-window" | "capture-with-driver"
+      "capture" | "capture-window" | "capture-with-driver" | "viewer-capture"
     ) && !eof
     {
       incoming.extend_from_slice(if target == "windows-2" {
@@ -2614,14 +2634,18 @@ fn macos_catalog_defaults_to_a_window_and_enables_input_only_on_start() {
       mock.records("windows")[0].arguments,
       ["1.0.11", "windows", "macos"]
     );
+    let capture = mock.captures().pop().unwrap();
+    let lease = &capture.arguments[4];
+    assert!(ctream_proto::valid_capture_lease(lease));
     assert_eq!(
-      mock.captures()[0].arguments,
+      capture.arguments,
       [
-        "1.0.11",
-        "capture-with-driver",
+        ctream_proto::DAEMON_VERSION,
+        "viewer-capture",
         "macos",
-        driver,
-        "macos-31-42"
+        "macos-31-42",
+        lease,
+        driver
       ]
     );
     assert!(mock.inputs().is_empty());
@@ -2632,10 +2656,17 @@ fn macos_catalog_defaults_to_a_window_and_enables_input_only_on_start() {
     let input = mock.inputs().pop().unwrap();
     assert_eq!(
       input.arguments,
-      ["1.0.11", "input-window", "macos", "macos-31-42"]
+      [
+        ctream_proto::DAEMON_VERSION,
+        "viewer-input",
+        "macos",
+        crate::live::viewer_id(),
+        "macos-31-42",
+        lease
+      ]
     );
     viewer.close_viewer(&ctx);
-    assert!(input.closed() && input.cancelled());
+    poll_until(&mut viewer, &ctx, |_| input.closed() && input.cancelled());
   }
 }
 
@@ -2761,4 +2792,107 @@ fn targeted_catalog_fallback_merges_discovered_sources_before_selection() {
   );
   assert_eq!(mock.records("capture-drivers").len(), 4);
   assert!(mock.inputs().is_empty());
+}
+
+#[test]
+fn live_participants_paint_on_idle_read_only_capture_then_share_viewer_input() {
+  let mock = Mock::default();
+  mock.0.config.lock().unwrap().live = true;
+  let ctx = egui::Context::default();
+  let mut viewer = create(&mock, &ctx, true, "auto");
+  poll_until(&mut viewer, &ctx, |viewer| {
+    ready(viewer) && !mock.records("live-room").is_empty()
+  });
+  let room = mock.records("live-room").pop().unwrap();
+  assert_eq!(room.target(), Some("windows-1"));
+  assert_eq!(room.arguments.last().unwrap(), "window-1");
+  assert!(mock.inputs().is_empty());
+  room.push_frame_bytes(b"{\"type\":\"action\",\"participant_id\":\"remote\",\"action\":{\"operation\":\"click\",\"point\":[0.25,0.5]}}\n");
+  let deadline = Instant::now() + DEADLINE;
+  let frame = loop {
+    let frame = render(&mut viewer, &ctx, Vec::new());
+    if rendered_label(&frame, "agent-one · Clicked").is_some() {
+      break frame;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "remote actions must appear on a stationary setup preview"
+    );
+    thread::yield_now();
+  };
+  let preview = viewer.preview.as_ref().unwrap();
+  let texture = preview.texture.as_ref().unwrap().id();
+  let rect = rendered_image(&frame, texture);
+  let tip = rect.min + rect.size() * egui::vec2(0.25, 0.5);
+  assert!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
+    egui::epaint::Shape::Circle(circle) if circle.center.distance(tip) < 0.1 && circle.radius >= 5.0)));
+  assert_eq!(preview.frame_counts().received, 1);
+  assert!(room.sent().is_empty());
+
+  viewer.start(&ctx);
+  poll_until(&mut viewer, &ctx, |v| {
+    v.preview.as_ref().is_some_and(|p| p.input.is_some())
+  });
+  let opened = render(&mut viewer, &ctx, Vec::new());
+  let at = rendered_image(&opened, texture).center();
+  render(&mut viewer, &ctx, interactions(at, false));
+  let deadline = Instant::now() + DEADLINE;
+  while !room.sent().contains("press_keys") {
+    assert!(
+      Instant::now() < deadline,
+      "successful local input was not published"
+    );
+    thread::yield_now();
+  }
+  let wire = room.sent();
+  let activity: Vec<ctream_proto::live::LiveAction> = wire
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect();
+  assert_eq!(
+    activity
+      .iter()
+      .filter_map(|a| (a.operation() != "move").then_some(a.operation()))
+      .collect::<Vec<_>>(),
+    ["pointer_down", "pointer_up", "scroll", "press_keys"],
+  );
+  assert!(!wire.contains("F8"));
+  assert!(mock.inputs()[0].sent().contains("key F8 1\n"));
+
+  room.push_frame_bytes(b"{\"type\":\"left\",\"participant_id\":\"remote\"}\n");
+  let deadline = Instant::now() + DEADLINE;
+  while rendered_label(&render(&mut viewer, &ctx, Vec::new()), "Participants · 1").is_none() {
+    assert!(
+      Instant::now() < deadline,
+      "departed participant was retained"
+    );
+    thread::yield_now();
+  }
+  // Keep the rejoin handshake pending while physical input continues. No
+  // earlier activity or input during the outage may reappear on the new wire.
+  let reopen = mock.delay("live-room", "windows-1");
+  room.finish();
+  poll_until(&mut viewer, &ctx, |_| mock.records("live-room").len() == 2);
+  let gap = render(&mut viewer, &ctx, interactions(at, false));
+  assert!(rendered_label(&gap, "Reconnecting participants…").is_some());
+  assert!(rendered_label(&gap, "agent-one").is_none());
+  let rejoined = mock.records("live-room")[1].clone();
+  reopen.release();
+  let deadline = Instant::now() + DEADLINE;
+  while rendered_label(&render(&mut viewer, &ctx, Vec::new()), "Participants · 2").is_none() {
+    assert!(Instant::now() < deadline, "fresh snapshot never appeared");
+    thread::yield_now();
+  }
+  assert!(
+    rejoined.sent().is_empty(),
+    "live activity was replayed after reconnect"
+  );
+  assert_eq!(mock.inputs()[0].sent().matches("key F8 1\n").count(), 2);
+
+  viewer.close_viewer(&ctx);
+  viewer.selected = Some(Target::Windows(2));
+  viewer.load_target(&ctx);
+  poll_until(&mut viewer, &ctx, |_| {
+    rejoined.closed() && rejoined.cancelled()
+  });
 }

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 
@@ -12,6 +13,30 @@ function record(request: unknown) {
   appendFileSync(log, JSON.stringify({args, request}) + "\n");
 }
 
+let currentTurn: string | undefined;
+let turnCount = 0;
+function handleTurn(request: {operation: string; turn_id?: string}): boolean {
+  const busy = {ok: false, error: "desktop is busy", code: "busy", owner_id: "session-owner"};
+  if (request.operation === "acquire_turn") {
+    if (currentTurn) console.log(JSON.stringify(busy));
+    else {
+      currentTurn = `turn-${++turnCount}`;
+      console.log(JSON.stringify({ok: true, result: {turn_id: currentTurn}}));
+    }
+    return true;
+  }
+  if (request.turn_id && (currentTurn !== request.turn_id || mode === "expired_turn")) {
+    console.log(JSON.stringify({ok: false, error: "expired turn", code: "stale_turn"}));
+    return true;
+  }
+  if (request.operation === "release_turn") currentTurn = undefined;
+  if (currentTurn && !request.turn_id && !["capabilities", "screenshot", "elements"].includes(request.operation)) {
+    console.log(JSON.stringify({ok: false, code: "stale_turn", error: "the owner must supply its turn ID", action_id: randomUUID()}));
+    return true;
+  }
+  return false;
+}
+
 if (args.includes("session")) {
   const lifecycle = log + ".lifecycle";
   appendFileSync(lifecycle, `start ${process.pid}\n`);
@@ -23,6 +48,7 @@ if (args.includes("session")) {
   for await (const line of createInterface({input: process.stdin, crlfDelay: Infinity})) {
     const request = JSON.parse(line);
     record(request);
+    if (args.includes("1.0.7") && handleTurn(request)) continue;
     if (mode === "hang") continue;
     if (mode === "slow") await new Promise((resolve) => setTimeout(resolve, 150));
     if (mode === "exit") {
@@ -48,7 +74,9 @@ if (args.includes("session")) {
       case "elements": result = [{...element, name: mode === "chunked" ? "保存" : element.name}]; break;
       default: result = null;
     }
-    const message = JSON.stringify({ok: true, result: mode === "bad_shape" ? {} : result}) + "\n";
+    const action_id = args.includes("1.0.7") && result === null && request.operation !== "release_turn"
+      ? randomUUID() : undefined;
+    const message = JSON.stringify({ok: true, action_id, result: mode === "bad_shape" ? {} : result}) + "\n";
     if (mode === "exit_after_reply") {
       await new Promise<void>((resolve) => process.stdout.write(message, () => resolve()));
       process.exit(0);

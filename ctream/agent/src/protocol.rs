@@ -1,3 +1,4 @@
+use ctream_client::sdk::SessionProtocol;
 use ctream_driver::{ControlOperation, Result};
 use ctream_proto::{
   ATTRIBUTED_SESSION_VERSION, BOUNDS_VERSION, CAPTURE_CATALOG_VERSION, CAPTURE_DRIVER_VERSION,
@@ -18,11 +19,37 @@ pub enum TargetOperation<'a> {
   InputWindow(&'a str),
 }
 
+pub enum ViewerLane<'a> {
+  Observe(&'a str),
+  Control { lease: Option<&'a str> },
+  Semantic,
+}
+
 pub enum Request<'a> {
-  AttributedSession {
+  ViewerLane(Target, Option<&'a str>, ViewerLane<'a>),
+  LiveRoom {
+    turns: bool,
+    authoritative: bool,
     target: Target,
     agent_id: &'a str,
     window: Option<&'a str>,
+  },
+  AttributedSession {
+    protocol: SessionProtocol,
+    target: Target,
+    agent_id: &'a str,
+    window: Option<&'a str>,
+  },
+  ViewerCapture {
+    window: &'a str,
+    lease: &'a str,
+    driver: &'a str,
+    video: Option<VideoRequest>,
+  },
+  LeasedViewerInput {
+    window: &'a str,
+    lease: &'a str,
+    label: &'a str,
   },
   SessionCapture {
     window: &'a str,
@@ -35,6 +62,12 @@ pub enum Request<'a> {
   Ping,
   InputCapabilities,
   InputSync(Target, Option<&'a str>),
+  ViewerInput {
+    target: Target,
+    label: &'a str,
+    window: Option<&'a str>,
+    receipts: bool,
+  },
   Discover {
     windows_displays: bool,
     macos: bool,
@@ -127,39 +160,150 @@ fn supports_capture_selection(version: &str, target: &str) -> bool {
   version == CAPTURE_DRIVER_VERSION || (version == WINDOWS_DESKTOP_VERSION && target == "windows")
 }
 
+fn validate_source(target: Target, window: Option<&str>) -> Result<()> {
+  match (target, window) {
+    (target, None) if target.window_only() => {
+      return Err("desktop target requires a window ID".into());
+    }
+    (Target::MacosDesktop, Some(id)) => validate_macos_window(id)?,
+    (Target::X11(_), Some(id)) if WindowId::x11_xid(id).is_none() => {
+      return Err("invalid X11 window identifier".into());
+    }
+    (_, Some(id)) if !valid_window_id(id) => return Err("invalid window identifier".into()),
+    _ => {}
+  }
+  Ok(())
+}
+
+fn validate_input_target(target: Target, window: Option<&str>) -> Result<()> {
+  validate_source(target, window)?;
+  if matches!(target, Target::Wayland(_)) && window.is_some() {
+    return Err("physical input is unavailable for Wayland windows".into());
+  }
+  Ok(())
+}
+
 pub fn parse(args: &[String]) -> Result<Request<'_>> {
   match args {
+    [version, operation, target, rest @ ..]
+      if version == ctream_proto::DAEMON_VERSION
+        && matches!(
+          operation.as_str(),
+          "viewer-observe" | "viewer-control" | "viewer-session"
+        ) =>
+    {
+      let target = Target::parse(target)?;
+      let (lane, window) = match (operation.as_str(), rest) {
+        ("viewer-observe", [label, window @ ..])
+          if window.len() <= 1 && ctream_proto::valid_agent_id(label) =>
+        {
+          (ViewerLane::Observe(label), window.first())
+        }
+        ("viewer-control", [window, lease]) if target == Target::MacosDesktop => {
+          validate_capture_lease(lease)?;
+          (ViewerLane::Control { lease: Some(lease) }, Some(window))
+        }
+        ("viewer-control", window) if window.len() <= 1 => {
+          (ViewerLane::Control { lease: None }, window.first())
+        }
+        ("viewer-session", [window]) if matches!(target, Target::Wayland(_)) => {
+          (ViewerLane::Semantic, Some(window))
+        }
+        _ => return Err("invalid viewer selection".into()),
+      };
+      let window = window.map(String::as_str);
+      if matches!(lane, ViewerLane::Control { .. }) {
+        validate_input_target(target, window)?;
+      } else {
+        validate_source(target, window)?;
+      }
+      Ok(Request::ViewerLane(target, window, lane))
+    }
     [version, operation, target, agent_id, windows @ ..]
-      if matches!(
-        version.as_str(),
-        ATTRIBUTED_SESSION_VERSION | TAGGED_AGENT_ID_VERSION
-      ) && operation == "attributed-session"
-        && windows.len() <= 1 =>
+      if windows.len() <= 1
+        && matches!(
+          (version.as_str(), operation.as_str()),
+          (
+            ATTRIBUTED_SESSION_VERSION | TAGGED_AGENT_ID_VERSION,
+            "attributed-session"
+          ) | (ctream_proto::LIVE_VERSION, "live-room")
+            | (
+              ctream_proto::TURN_VERSION | ctream_proto::DAEMON_VERSION,
+              "turn-session" | "turn-room"
+            )
+        ) =>
     {
       let required = agent_id_version(agent_id).ok_or("invalid agent ID")?;
-      if required == TAGGED_AGENT_ID_VERSION && version != required {
+      if required == TAGGED_AGENT_ID_VERSION && version == ATTRIBUTED_SESSION_VERSION {
         return Err("invalid agent ID".into());
       }
       let target = Target::parse(target)?;
       let window = windows.first().map(String::as_str);
-      if target.window_only() && window.is_none() {
-        return Err("desktop target requires a window ID".into());
-      }
-      if let Some(window) = window {
-        if !valid_window_id(window) {
-          return Err("invalid window identifier".into());
-        }
-        if target == Target::MacosDesktop {
-          validate_macos_window(window)?;
-        }
-        if matches!(target, Target::X11(_)) && WindowId::x11_xid(window).is_none() {
-          return Err("invalid X11 window identifier".into());
-        }
+      validate_source(target, window)?;
+      if matches!(operation.as_str(), "live-room" | "turn-room") {
+        return Ok(Request::LiveRoom {
+          authoritative: version == ctream_proto::DAEMON_VERSION,
+          turns: matches!(
+            version.as_str(),
+            ctream_proto::TURN_VERSION | ctream_proto::DAEMON_VERSION
+          ),
+          target,
+          agent_id,
+          window,
+        });
       }
       Ok(Request::AttributedSession {
+        protocol: match version.as_str() {
+          ctream_proto::DAEMON_VERSION => SessionProtocol::Daemon,
+          ctream_proto::TURN_VERSION => SessionProtocol::Turns,
+          _ => SessionProtocol::Attributed,
+        },
         target,
         agent_id,
         window,
+      })
+    }
+    [
+      version,
+      operation,
+      target,
+      window,
+      lease,
+      driver,
+      options @ ..,
+    ] if version == ctream_proto::DAEMON_VERSION
+      && operation == "viewer-capture"
+      && target == "macos"
+      && options.len() <= 1 =>
+    {
+      validate_macos_window(window)?;
+      validate_capture_lease(lease)?;
+      if !valid_capture_driver(driver) {
+        return Err("invalid capture driver identifier".into());
+      }
+      let video = options
+        .first()
+        .map(|options| video_request(options))
+        .transpose()?;
+      Ok(Request::ViewerCapture {
+        window,
+        lease,
+        driver,
+        video,
+      })
+    }
+    [version, operation, target, label, window, lease]
+      if version == ctream_proto::DAEMON_VERSION
+        && operation == "viewer-input"
+        && target == "macos" =>
+    {
+      validate_macos_window(window)?;
+      validate_capture_lease(lease)?;
+      agent_id_version(label).ok_or("invalid viewer agent ID")?;
+      Ok(Request::LeasedViewerInput {
+        window,
+        lease,
+        label,
       })
     }
     [version, operation, target, window, lease]
@@ -168,13 +312,7 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
         && matches!(operation.as_str(), "session-capture" | "session-input") =>
     {
       validate_macos_window(window)?;
-      if lease.len() != 32
-        || !lease
-          .bytes()
-          .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-      {
-        return Err("invalid macOS capture lease".into());
-      }
+      validate_capture_lease(lease)?;
       Ok(if operation == "session-capture" {
         Request::SessionCapture { window, lease }
       } else {
@@ -184,25 +322,30 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
     [version, operation] if version == INPUT_SYNC_VERSION && operation == "input-capabilities" => {
       Ok(Request::InputCapabilities)
     }
+    [version, operation, target, label, window @ ..]
+      if matches!(
+        version.as_str(),
+        ctream_proto::TURN_VERSION | ctream_proto::DAEMON_VERSION
+      ) && operation == "viewer-input"
+        && window.len() <= 1 =>
+    {
+      agent_id_version(label).ok_or("invalid viewer agent ID")?;
+      let target = Target::parse(target)?;
+      let window = window.first().map(String::as_str);
+      validate_input_target(target, window)?;
+      Ok(Request::ViewerInput {
+        target,
+        label,
+        window,
+        receipts: version == ctream_proto::DAEMON_VERSION,
+      })
+    }
     [version, operation, target, window @ ..]
       if version == INPUT_SYNC_VERSION && operation == "input-sync" && window.len() <= 1 =>
     {
       let target = Target::parse(target)?;
       let window = window.first().map(String::as_str);
-      match (target, window) {
-        (target, None) if target.window_only() => {
-          return Err("desktop target requires a window ID".into());
-        }
-        (Target::Wayland(_), Some(_)) => {
-          return Err("physical input is unavailable for Wayland windows".into());
-        }
-        (Target::MacosDesktop, Some(id)) => validate_macos_window(id)?,
-        (Target::X11(_), Some(id)) if WindowId::x11_xid(id).is_none() => {
-          return Err("invalid X11 window identifier".into());
-        }
-        (_, Some(id)) if !valid_window_id(id) => return Err("invalid window identifier".into()),
-        _ => {}
-      }
+      validate_input_target(target, window)?;
       Ok(Request::InputSync(target, window))
     }
     [version, operation, tail @ ..] if version == VIDEO_STREAM_VERSION => {
@@ -315,6 +458,22 @@ pub fn parse(args: &[String]) -> Result<Request<'_>> {
   }
 }
 
+fn validate_capture_lease(lease: &str) -> Result<()> {
+  if !ctream_proto::valid_capture_lease(lease) {
+    return Err("invalid macOS capture lease".into());
+  }
+  Ok(())
+}
+
+fn video_request(options: &str) -> Result<VideoRequest> {
+  if options.len() > VIDEO_REQUEST_LIMIT {
+    return Err("video request exceeds 4096 bytes".into());
+  }
+  let request: VideoRequest = serde_json::from_str(options)?;
+  request.validate()?;
+  Ok(request)
+}
+
 fn parse_video_version<'a>(operation: &str, tail: &'a [String]) -> Result<Request<'a>> {
   match (operation, tail) {
     ("video-codecs", []) => Ok(Request::VideoCapabilities),
@@ -337,11 +496,7 @@ fn parse_video_version<'a>(operation: &str, tail: &'a [String]) -> Result<Reques
         }
         _ => {}
       }
-      if options.len() > VIDEO_REQUEST_LIMIT {
-        return Err("video request exceeds 4096 bytes".into());
-      }
-      let request: VideoRequest = serde_json::from_str(options)?;
-      request.validate()?;
+      let request = video_request(options)?;
       Ok(Request::CaptureVideo {
         target,
         driver,
@@ -416,7 +571,8 @@ mod tests {
       Request::AttributedSession {
         target: Target::X11(2),
         agent_id: "qa.1",
-        window: Some("x11-7")
+        window: Some("x11-7"),
+        protocol: SessionProtocol::Attributed
       }
     ));
     for invalid in [
@@ -456,6 +612,30 @@ mod tests {
       ],
     ] {
       assert!(parse(&args(&invalid)).is_err(), "{invalid:?}");
+    }
+  }
+
+  #[test]
+  fn live_rooms_bind_to_an_exact_source_under_the_live_contract() {
+    let version = ctream_proto::LIVE_VERSION;
+    assert!(matches!(
+      parse(&args(&[version, "live-room", ":3", "otter#7c2a", "x11-a"])),
+      Ok(Request::LiveRoom {
+        target: Target::X11(3),
+        agent_id: "otter#7c2a",
+        window: Some("x11-a"),
+        turns: false,
+        authoritative: false
+      })
+    ));
+    for invalid in [
+      vec![TAGGED_AGENT_ID_VERSION, "live-room", ":3", "viewer"],
+      vec![version, "live-room", ":3", "viewer", "x11-0"],
+      vec![version, "live-room", "macos", "viewer"],
+      vec![version, "live-room", "macos", "viewer", "invalid"],
+      vec![version, "live-room", ":3", "invalid label"],
+    ] {
+      assert!(parse(&args(&invalid)).is_err());
     }
   }
 
@@ -515,6 +695,120 @@ mod tests {
       vec![INPUT_SYNC_VERSION, "input-sync", ":0", "x11-1", "extra"],
     ] {
       assert!(parse(&args(&argv)).is_err(), "{argv:?}");
+    }
+  }
+
+  #[test]
+  fn viewer_capture_and_input_bind_to_the_same_valid_macos_lease() {
+    let version = ctream_proto::DAEMON_VERSION;
+    let lease = "fedcba9876543210fedcba9876543210";
+    let capture = args(&[
+      version,
+      "viewer-capture",
+      "macos",
+      "macos-1-2",
+      lease,
+      "auto",
+    ]);
+    assert!(
+      matches!(parse(&capture).unwrap(), Request::ViewerCapture { lease: found, window: "macos-1-2", video: None, .. } if found == lease)
+    );
+    let observe = args(&[
+      version,
+      "viewer-input",
+      "macos",
+      "agent",
+      "macos-1-2",
+      lease,
+    ]);
+    assert!(
+      matches!(parse(&observe).unwrap(), Request::LeasedViewerInput { lease: found, window: "macos-1-2", .. } if found == lease)
+    );
+    for request in [
+      vec![
+        ctream_proto::TURN_VERSION,
+        "viewer-input",
+        "macos",
+        "agent",
+        "macos-1-2",
+        lease,
+      ],
+      vec![
+        version,
+        "viewer-input",
+        "macos",
+        "agent",
+        "macos-1-2",
+        "bad",
+      ],
+      vec![
+        version,
+        "viewer-capture",
+        "windows",
+        "macos-1-2",
+        lease,
+        "auto",
+      ],
+      vec![
+        version,
+        "viewer-capture",
+        "macos",
+        "macos-1-2",
+        lease,
+        "auto",
+        "{}",
+      ],
+    ] {
+      assert!(parse(&args(&request)).is_err());
+    }
+  }
+
+  #[test]
+  fn viewer_input_validates_source_and_label_under_the_turn_contract() {
+    let version = ctream_proto::TURN_VERSION;
+    assert!(matches!(
+      parse(&args(&[
+        version,
+        "viewer-input",
+        ":0",
+        "viewer-one",
+        "x11-ab"
+      ]))
+      .unwrap(),
+      Request::ViewerInput {
+        target: Target::X11(0),
+        label: "viewer-one",
+        window: Some("x11-ab"),
+        receipts: false
+      }
+    ));
+    for request in [
+      vec![
+        ctream_proto::LIVE_VERSION,
+        "viewer-input",
+        ":0",
+        "viewer-one",
+      ],
+      vec![version, "viewer-input", ":0", "bad label"],
+      vec![version, "viewer-input", "macos", "viewer-one"],
+      vec![
+        version,
+        "viewer-input",
+        "wayland-0",
+        "viewer-one",
+        "a-window",
+      ],
+      vec![version, "viewer-input", ":0", "viewer-one", "x11-0"],
+      vec![
+        version,
+        "viewer-input",
+        ":0",
+        "viewer-one",
+        "x11-ab",
+        "extra",
+      ],
+    ] {
+      assert!(parse(&args(&request)).is_err(), "{request:?}");
     }
   }
 

@@ -17,4 +17,3 @@ ctream-client.workspace = true
 ctream-platform.workspace = true
 ctream-proto.workspace = true
 serde_json.workspace = true
-uuid.workspace = true

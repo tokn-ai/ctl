@@ -829,6 +829,111 @@ Classic explicit labels can still use SDK build 3 and agent build 15. An
 explicitly selected SDK build 2 continues to open an anonymous session.
 The package version is `0.1.1`.
 
+Live participants advance `ctream_agent` from `1.1.16` (build 16) to
+`1.1.17` (build 17) and `ctream_sdk` from `1.0.4` (build 4) to `1.0.5`
+(build 5). The TypeScript package is `@tokn-ai/ctream-sdk` 0.1.2.
+The new host command `1.1.17 live-room TARGET AGENT_ID [WINDOW]` registers one
+connection for that exact source. Its first newline-delimited JSON event has
+type `snapshot`, with `self_id` and a roster of `participant_id` and `agent_id`
+pairs. Subsequent events have type `joined`, `left` or `action`. A host-assigned
+participant ID identifies each connection, including connections using the same
+agent label. Closing stdin leaves the room.
+
+A viewer can write a visual action on stdin for fanout. Actions describe
+pointer motion, presses, releases, clicks, drags, scrolling, or a keyboard,
+text or accessibility operation. Pointer positions are normalized to the
+selected source. Keyboard and semantic indicators omit key names, typed text
+and control arguments. Records are limited to 64 KiB excluding the newline.
+Overlay events are transient. Joining or reconnecting starts with the current
+roster. Capture, input and journal formats retain their existing contracts.
+
+The local `ctream watch TARGET [--window ID] [--agent-id ID] --protocol 1.0.5`
+command relays the live channel. The SDK's `watch()` iterator consumes its
+events. On an updated host, existing attributed sessions also announce
+presence and successful actions to their source's viewers. Older hosts
+continue to serve their supported capture and input operations.
+
+Desktop turns advance `ctream_agent` from `1.1.17` (build 17) to
+`1.1.18` (build 18), and `ctream_sdk` from `1.0.5` (build 5) to
+`1.0.6` (build 6). The TypeScript package is `@tokn-ai/ctream-sdk` 0.1.3.
+Agents accept `turn-session TARGET AGENT_ID [WINDOW]` and `turn-room TARGET
+AGENT_ID [WINDOW]` at build 18. The CLI selects these with
+`session|watch ... --protocol 1.0.6`. A session accepts `acquire_turn` with
+optional `ttl_ms` (default 10,000, maximum 30,000), returns a private
+`turn_id`, and accepts that ID on mutations and `release_turn`. Failures
+can include `code` (`busy` or `stale_turn`) and the current owner's
+`owner_id`. Observations stay available throughout a turn.
+
+A turn-aware subscriber receives a roster snapshot and then a `turn` event
+with the holder's participant record and Unix-millisecond `expires_at_ms`.
+Both fields are null when the desktop has no owner. Holder changes reach all
+window and display rooms in the desktop's input domain. Pointer and action
+overlays remain limited to the selected source. A journaled action can carry
+its public `action_id` to correlate it with host activity.
+
+The updated host admits input on retained protocols through the same
+authority. Older sessions can receive a busy error in their existing failure
+format. Retained watches continue to receive their original event shapes.
+Windows monitors share the interactive logon session. macOS windows share the
+user desktop. Linux conservatively groups the host user's X11 and Wayland
+targets together because remote connections cannot reliably identify which
+X display belongs to the same compositor.
+Linux input paths that launch an external driver helper use kernel pidfds
+(Linux 5.3 or later) to keep its admission valid through cleanup if the
+agent exits unexpectedly.
+
+The native viewer's build-18 `viewer-input TARGET AGENT_ID [WINDOW]` channel
+retains the input readiness header. A GUI sends `take-turn TTL_MS` and
+`release-turn` on that same connection. Each `batch COUNT` or scoped
+`batch turn COUNT` is followed by that many input lines. The host replies
+with `ok` after delivery or a JSON error containing the conflict code and
+optional owner. The viewer keeps capture open during contention. A
+disconnection or expired turn fences subsequent requests. An interrupted
+action can have an unknown outcome after dispatch. The host never retries it.
+`ctream-agent activity --details` adds the effective host account and, for
+actions in a turn, a public `turn_ref`. The account is the effective OS user
+on the display host. Two callers using the same SSH account share this
+principal. The host assigns each connection a session ID, and the clients
+choose their agent labels. The private token stays off the
+journal and the watch channel. Legacy history remains readable.
+
+Desktop daemon dispatch advances `ctream_agent` from `1.1.18` (build 18)
+to `1.1.19` (build 19), and `ctream_sdk` from `1.0.6` (build 6) to
+`1.0.7` (build 7). The TypeScript package is `@tokn-ai/ctream-sdk` 0.1.4.
+The display host runs one on-demand desktop daemon. Public SSH, CLI and
+platform workers connect locally. The daemon owns admission, durable audit,
+driver dispatch, and confirmed overlay publication. Reaching a turn boundary
+does not replay or roll back prior input.
+
+Build 19 `turn-session` adds a top-level public `action_id` to journaled
+mutation replies, including identified refusals. The `result` on success
+remains null. `turn-room` includes daemon-confirmed action overlays and their
+IDs, and filters transient action hints submitted by clients. For a native viewer, build 19 acknowledges a delivered batch with
+`ok ACTION_UUID` and returns the same public `action_id` on a journaled
+error. A turn-management acknowledgement remains `ok`. Earlier native
+channels retain their original acknowledgement format. On macOS the
+`viewer-capture macos WINDOW LEASE DRIVER [VIDEO_JSON]` and
+`viewer-input macos LABEL WINDOW LEASE` operations bind control to one
+subscriber's active capture even when several subscribers share its source.
+
+The native viewer uses `viewer-observe TARGET LABEL [WINDOW]` to create its
+participant. Its first private response line contains an opaque attachment
+capability, followed by ordinary confirmed roster, turn, and action events.
+`viewer-control TARGET [WINDOW [MACOS_CAPTURE_LEASE]]` and
+`viewer-session TARGET WINDOW` consume this capability on stdin before native
+input or semantic session requests. Only the creator receives the capability,
+and closing its observer revokes the attached control lane. The observer and
+controller appear as one participant. Two viewers with the same label retain
+distinct participant IDs. Standalone input and older watchers remain available.
+
+`ctream-agent activity --details` retains the history shape and adds optional
+`refusal_code` and `owner_id` on denied input. The desktop daemon commits an
+initial redacted row before calling a driver. Lost acknowledgements leave it
+`unknown`. Confirmed input, its observer event when available, and its
+requester's receipt have the same public ID. Previous session, watch and
+capture versions retain their wire formats. Input arriving on those protocols
+is still subject to daemon arbitration and audit.
+
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility
 impact. Keep PR titles brief; put protocol details in the description.

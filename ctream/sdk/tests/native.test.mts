@@ -21,9 +21,9 @@ before(() => {
     .find(message => message.reason === "compiler-artifact" && message.target.name === "ctream" && message.executable);
   assert.ok(artifact, "Cargo must report the ctream executable");
   executable = artifact.executable;
-});
+}, {timeout: 120_000}); // A cold Rust build can exceed Bun's 5s hook default.
 
-function fixture(t: TestContext, profile: "current" | "legacy" | "denied") {
+function fixture(t: TestContext, profile: "current" | "legacy" | "denied", turns = false) {
   const dir = mkdtempSync(join(tmpdir(), "ctream-native-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const launcher = fileURLToPath(new URL("./ssh-fixture.mts", import.meta.url));
@@ -35,6 +35,7 @@ function fixture(t: TestContext, profile: "current" | "legacy" | "denied") {
     ssh_program: process.execPath,
     ssh_args: sshArgs,
     timeout_ms: requestTimeoutMs,
+    turns,
   });
   const read = (name: string) => readFileSync(join(dir, name), "utf8");
   function legacySession() {
@@ -52,6 +53,56 @@ function fixture(t: TestContext, profile: "current" | "legacy" | "denied") {
   }
   return { client, read, legacySession };
 }
+
+test("watch negotiates the live host protocol over SSH and leaves the selected window on break", async (t) => {
+  const {client, read} = fixture(t, "current");
+  const watch = client.watch(":2", "x11-7");
+  const timeout = setTimeout(() => { watch.close().catch(() => {}); }, requestTimeoutMs);
+  try {
+    let roster = false;
+    for await (const event of watch) {
+      assert.ok(event.type === "snapshot");
+      assert.deepEqual(event.participants, [{participant_id: event.self_id, agent_id: client.agent_id}]);
+      roster = true;
+      break;
+    }
+    assert.ok(roster);
+    assert.deepEqual(read("lifecycle").trim().split("\n").map(line => line.split(" ").slice(1).join(" ")), [
+      "watch open", "watch close",
+    ]);
+  } finally {
+    clearTimeout(timeout);
+    await watch.close();
+  }
+});
+
+test("opted-in sessions and watches negotiate turn protocols over SSH", async (t) => {
+  const {client, read} = fixture(t, "current", true);
+  const session = client.session(":2", "x11-7");
+  const watch = client.watch(":2", "x11-7");
+  const timeout = setTimeout(() => { watch.close().catch(() => {}); }, requestTimeoutMs);
+  try {
+    await session.withTurn(turn => turn.pressKeys("Tab"));
+    assert.equal((await watch.next()).value?.type, "snapshot");
+    assert.deepEqual((await watch.next()).value, {type: "turn", holder: null, expires_at_ms: null});
+  } finally {
+    clearTimeout(timeout);
+    await Promise.all([session.close(), watch.close()]);
+  }
+  assert.deepEqual(read("lifecycle").trim().split("\n").map(line => line.split(" ")[1]), ["turn-session", "turn-room"]);
+  assert.deepEqual(read("events").trim().split("\n").map(line => JSON.parse(line)), [
+    {operation: "acquire_turn"}, {operation: "press_keys", keys: ["Tab"], turn_id: "fixture-turn"},
+    {operation: "release_turn", turn_id: "fixture-turn"},
+  ]);
+});
+
+test("refused turn negotiation never retries through an unprotected session", async (t) => {
+  const {client, read} = fixture(t, "legacy", true);
+  const session = client.session(":2", "x11-7");
+  await assert.rejects(session.withTurn(() => assert.fail("unexpected turn")), /unsupported control turn protocol/);
+  await assert.rejects(session.close(), /unsupported control turn protocol/);
+  assert.match(read("lifecycle"), /^\d+ turn-session\n$/);
+});
 
 test("the SDK sends its generated ID to the display host across sessions", async (t) => {
   const { client, read } = fixture(t, "current");

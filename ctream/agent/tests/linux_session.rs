@@ -2,6 +2,12 @@
 
 #[path = "linux_session/attribution.rs"]
 mod attribution;
+#[path = "linux_session/capture_pool.rs"]
+mod capture_pool;
+#[path = "linux_session/host.rs"]
+mod host;
+#[path = "linux_session/viewer.rs"]
+mod viewer;
 
 use ctream_client::{
   Client,

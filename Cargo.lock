@@ -1615,13 +1615,17 @@ dependencies = [
  "ctream-proto",
  "dirs",
  "dispatch2",
+ "interprocess",
  "libc",
  "rusqlite",
  "rustix 1.1.6",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
+ "widestring",
  "windows",
+ "windows-sys 0.61.2",
  "x11rb 0.14.0",
 ]
 
@@ -1633,7 +1637,6 @@ dependencies = [
  "ctream-platform",
  "ctream-proto",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -1650,6 +1653,7 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1667,6 +1671,7 @@ dependencies = [
  "ctream-driver",
  "ctream-proto",
  "ctream-windows",
+ "rustix 1.1.6",
  "serde_json",
  "windows",
  "x11rb 0.14.0",
@@ -1710,6 +1715,7 @@ dependencies = [
  "ab_glyph",
  "block2 0.6.2",
  "ctl-bundle",
+ "ctream-agent",
  "ctream-client",
  "ctream-driver-capture",
  "ctream-driver-input",
@@ -1733,6 +1739,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

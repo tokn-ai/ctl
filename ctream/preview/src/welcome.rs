@@ -681,7 +681,15 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     {
       match result {
         Ok(control) if self.viewing && preview.ready() => {
-          preview.input = Some(input::Input::new(control))
+          preview.input = Some(input::Input::new(
+            control,
+            preview
+              .live
+              .as_ref()
+              .map(|live| live.publisher())
+              .unwrap_or_default(),
+            ctx,
+          ))
         }
         Ok(_) => {}
         Err(error) => preview.input_error = Some(format!("View only: {error}")),
@@ -718,10 +726,33 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
     self.chrome = chrome::Chrome::default();
     if session.supports_input() {
       let control = session.clone();
-      self.control = Some(background_for(ctx, viewer_id(), move || control.input()));
+      let lease = self
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.capture_lease.clone());
+      let activity = self
+        .preview
+        .as_ref()
+        .and_then(|p| p.live.as_ref())
+        .map(|live| live.publisher())
+        .unwrap_or_default();
+      self.control = Some(background_for(ctx, viewer_id(), move || {
+        let attachment = activity.attachment()?;
+        control.viewer_control(
+          super::live::viewer_id(),
+          lease.as_deref(),
+          attachment.as_ref(),
+        )
+      }));
     }
     if session.supports_semantics() {
-      self.semantic = Some(semantic::Panel::new(session));
+      let activity = self
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.live.as_ref())
+        .map(|live| live.publisher())
+        .unwrap_or_default();
+      self.semantic = Some(semantic::Panel::new(session, activity));
     }
     self.control_requests = Some(requests);
     ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -1038,11 +1069,22 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
         error: error.is_some(),
         driver: preview.map(|preview| preview.driver.as_deref().unwrap_or("agent default")),
         debug: Some(self.show_stats),
+        turn: self
+          .preview
+          .as_ref()
+          .and_then(|p| p.input.as_ref())
+          .and_then(input::Input::turn_state),
       },
     );
     if chrome.close {
       self.close_viewer(ui.ctx());
       return;
+    }
+    if chrome.toggle_turn
+      && let Some(preview) = self.preview.as_mut()
+      && let Some(input) = preview.input.as_mut()
+    {
+      preview.input_error = input.toggle_turn().err().map(|err| err.to_string());
     }
     if chrome.toggle_debug {
       self.show_stats = !self.show_stats;
@@ -1089,7 +1131,15 @@ impl<T: Transport + Send + Sync + 'static> Viewer<T> {
           image
             .as_ref()
             .filter(|_| self.preview_error.is_none() && !diagnostics_open && !chrome.toggle_debug),
-          &[title, resize, diagnostics_link],
+          &[
+            title,
+            resize,
+            diagnostics_link,
+            preview
+              .live
+              .as_ref()
+              .map_or(egui::Rect::NOTHING, |live| live.region.get()),
+          ],
         );
       }
       if let Some(size) = preview.image_size() {

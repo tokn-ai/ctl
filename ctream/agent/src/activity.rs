@@ -1,12 +1,13 @@
-//! Host-owned attribution and arbitration for named desktop mutations.
+//! Durable, redacted host decisions and outcomes for desktop input requests.
 
-use ctream_proto::{Target, valid_agent_id, valid_window_id};
-use rusqlite::{Connection, OpenFlags, params};
+use ctream_proto::{Target, live::TurnError, valid_agent_id, valid_window_id};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde::Serialize;
 use std::{
   fs::{self, DirBuilder, OpenOptions},
   io::{self, Write},
   path::{Path, PathBuf},
+  sync::{Arc, Mutex},
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -16,43 +17,165 @@ const RETAINED: i64 = 10_000;
 const APPLICATION_ID: i32 = 0x4354_4143; // CTAC
 const DATABASE: &str = "activity.sqlite3";
 
-/// One agent-side session. Observations can share the session without opening
-/// the database or contending with an active mutation.
-pub struct Journal {
-  base: PathBuf,
-  session_id: String,
+/// The driver explicitly confirmed delivery or failure, or delivery was uncertain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+  Succeeded,
+  Failed,
+  Unknown,
 }
 
-impl Journal {
-  pub fn open() -> io::Result<Self> {
-    Ok(Self::at(state_directory()?))
-  }
-
-  fn at(base: PathBuf) -> Self {
-    Self {
-      base,
-      session_id: Uuid::new_v4().to_string(),
+impl Outcome {
+  pub fn from_result(result: &io::Result<()>) -> Self {
+    match result {
+      Ok(()) => Self::Succeeded,
+      Err(error) if ctream_driver::UnconfirmedDelivery::is(error) => Self::Unknown,
+      Err(_) => Self::Failed,
     }
   }
 
-  pub fn session_id(&self) -> &str {
-    &self.session_id
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Succeeded => "succeeded",
+      Self::Failed => "failed",
+      Self::Unknown => "unknown",
+    }
+  }
+}
+
+struct Writer {
+  db: Connection,
+  account_id: String,
+}
+
+/// One lazy SQLite writer per display daemon. The mutex covers short database
+/// transactions; device execution and acknowledgement happen outside it.
+#[derive(Default)]
+pub(crate) struct Store {
+  base: Option<PathBuf>,
+  writer: Mutex<Option<Writer>>,
+}
+
+impl Store {
+  #[cfg(test)]
+  pub(crate) fn at(base: PathBuf) -> Arc<Self> {
+    Arc::new(Self {
+      base: Some(base),
+      ..Default::default()
+    })
   }
 
-  /// Commit an unknown outcome before dispatch. The file lock spans the two
-  /// SQLite transactions and the complete operation, including its host ACK.
-  /// Readers can see the intent while the driver runs. Process exit drops the
-  /// lock; an interrupted or unconfirmed action retains its unknown outcome.
-  pub fn record(
+  pub(crate) fn for_session(self: &Arc<Self>, participant_id: &str) -> io::Result<Journal> {
+    if !valid_uuid(participant_id) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid activity participant ID",
+      ));
+    }
+    Ok(Journal {
+      store: self.clone(),
+      session_id: participant_id.to_owned(),
+      pending: None,
+    })
+  }
+
+  fn with_writer<T>(&self, write: impl FnOnce(&mut Writer) -> io::Result<T>) -> io::Result<T> {
+    let mut slot = self
+      .writer
+      .lock()
+      .map_err(|_| io::Error::other("activity writer unavailable"))?;
+    if slot.is_none() {
+      let base = match &self.base {
+        Some(base) => base.clone(),
+        None => state_directory()?,
+      };
+      let dir = prepare(&base, true)?;
+      let mut db = open_db(&dir, true)?;
+      initialize_writer(&mut db)?;
+      *slot = Some(Writer {
+        db,
+        account_id: host_account_id()?,
+      });
+    }
+    write(slot.as_mut().expect("writer initialized"))
+  }
+}
+
+/// Each controller issues one mutation at a time. Its outstanding receipt
+/// records the insertion position in case completion arrives after retention.
+pub(crate) struct Journal {
+  store: Arc<Store>,
+  session_id: String,
+  pending: Option<(String, i64)>,
+}
+
+impl Journal {
+  /// Commit an unknown outcome before the daemon sends a mutation to a worker.
+  pub fn start(
     &mut self,
     agent_id: &str,
     target: Target,
     window_id: Option<&str>,
-    operation: &'static str,
-    apply: impl FnOnce() -> io::Result<()>,
-  ) -> io::Result<()> {
+    operation: &str,
+    turn_ref: Option<&str>,
+  ) -> io::Result<String> {
+    if self.pending.is_some() {
+      return Err(io::Error::other(
+        "previous activity request is still in flight",
+      ));
+    }
+    let (action_id, position) =
+      self.insert(agent_id, target, window_id, operation, turn_ref, None)?;
+    self.pending = Some((action_id.clone(), position));
+    Ok(action_id)
+  }
+
+  /// Commit the admission decision, including the conflicting owner, atomically.
+  /// Only known decision codes and public identifiers are persisted.
+  pub fn refuse(
+    &self,
+    agent_id: &str,
+    target: Target,
+    window_id: Option<&str>,
+    operation: &str,
+    turn_ref: Option<&str>,
+    conflict: &TurnError,
+  ) -> io::Result<String> {
+    if !matches!(conflict.code.as_str(), "busy" | "stale_turn")
+      || conflict
+        .owner_id
+        .as_deref()
+        .is_some_and(|id| !valid_uuid(id))
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "invalid activity refusal",
+      ));
+    }
+    self
+      .insert(
+        agent_id,
+        target,
+        window_id,
+        operation,
+        turn_ref,
+        Some(conflict),
+      )
+      .map(|(action_id, _)| action_id)
+  }
+
+  fn insert(
+    &self,
+    agent_id: &str,
+    target: Target,
+    window_id: Option<&str>,
+    operation: &str,
+    turn_ref: Option<&str>,
+    refusal: Option<&TurnError>,
+  ) -> io::Result<(String, i64)> {
     if !valid_agent_id(agent_id)
       || window_id.is_some_and(|id| !valid_window_id(id))
+      || turn_ref.is_some_and(|id| !valid_uuid(id))
       || operation.is_empty()
       || operation.len() > 64
       || !operation
@@ -64,64 +187,146 @@ impl Journal {
         "invalid activity metadata",
       ));
     }
-    let dir = prepare(&self.base, true)?;
-    let lock = private_options()
-      .create(true)
-      .read(true)
-      .write(true)
-      .open(dir.join("activity.lock"))?;
-    check(&lock.metadata()?, false, true)?;
-    lock.lock()?;
-    let mut db = open_db(&dir, true)?;
-    let tx = db.transaction().map_err(io::Error::other)?;
-    if !initialized(&tx)? {
-      tx.execute_batch(
-        "CREATE TABLE actions (
-          action_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-          timestamp_ms INTEGER NOT NULL, target TEXT NOT NULL, window_id TEXT, operation TEXT NOT NULL,
-          status TEXT NOT NULL CHECK(status IN ('unknown','failed','succeeded'))
-        ) STRICT;"
-      ).map_err(io::Error::other)?;
-      tx.pragma_update(None, "application_id", APPLICATION_ID)
-        .map_err(io::Error::other)?;
-      tx.pragma_update(None, "user_version", 1)
-        .map_err(io::Error::other)?;
-    }
     let action_id = Uuid::new_v4().to_string();
-    let timestamp_ms: i64 = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .map_err(io::Error::other)?
-      .as_millis()
-      .try_into()
+    self.store.with_writer(|writer| {
+      let tx = writer
+        .db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+      let timestamp_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_millis()
+        .try_into()
+        .map_err(io::Error::other)?;
+      let status = if refusal.is_some() { "failed" } else { "unknown" };
+      tx.execute(
+        "INSERT INTO actions(action_id,session_id,agent_id,timestamp_ms,target,window_id,operation,status)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+          action_id, self.session_id, agent_id, timestamp_ms, target.to_string(),
+          window_id, operation, status
+        ],
+      )
       .map_err(io::Error::other)?;
-    tx.execute(
-      "INSERT INTO actions(action_id,session_id,agent_id,timestamp_ms,target,window_id,operation,status)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,'unknown')",
-      params![action_id,self.session_id,agent_id,timestamp_ms,target.to_string(),window_id,operation],
-    ).map_err(io::Error::other)?;
-    tx.execute(
-      "DELETE FROM actions WHERE rowid <= ?1",
-      [tx.last_insert_rowid() - RETAINED],
-    )
-    .map_err(io::Error::other)?;
-    tx.commit().map_err(io::Error::other)?;
-    let result = apply();
-    let status = if result.is_ok() {
-      "succeeded"
-    } else {
-      "failed"
-    };
-    let updated = db.execute(
-      "UPDATE actions SET status=?1 WHERE action_id=?2 AND status='unknown'",
-      params![status, action_id],
-    );
-    if !matches!(updated, Ok(1)) {
-      return Err(io::Error::other(
-        "the action may already have run and its recorded outcome is unknown",
-      ));
-    }
-    result
+      let row_id = tx.last_insert_rowid();
+      tx.execute(
+        "INSERT INTO action_context(action_id,account_id,turn_ref) VALUES (?1,?2,?3)",
+        params![action_id, writer.account_id, turn_ref],
+      )
+      .map_err(io::Error::other)?;
+      if let Some(conflict) = refusal {
+        tx.execute(
+          "INSERT INTO action_refusals(action_id,refusal_code,owner_id) VALUES (?1,?2,?3)",
+          params![action_id, conflict.code, conflict.owner_id],
+        )
+        .map_err(io::Error::other)?;
+      }
+      tx.execute(
+        "DELETE FROM actions WHERE rowid <= ?1",
+        [row_id - RETAINED],
+      )
+      .map_err(io::Error::other)?;
+      tx.commit().map_err(io::Error::other)?;
+      Ok((action_id, row_id))
+    })
   }
+
+  pub fn finish(&mut self, action_id: &str, outcome: Outcome) -> io::Result<()> {
+    let (_, row_id) = self
+      .pending
+      .take_if(|(id, _)| id == action_id)
+      .ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::InvalidInput,
+          "activity request is not pending in this session",
+        )
+      })?;
+    self
+      .store
+      .with_writer(|writer| {
+        let tx = writer
+          .db
+          .transaction_with_behavior(TransactionBehavior::Immediate)
+          .map_err(io::Error::other)?;
+        let updated = tx
+          .execute(
+            "UPDATE actions SET status=?1 WHERE action_id=?2 AND status='unknown'",
+            params![outcome.as_str(), action_id],
+          )
+          .map_err(io::Error::other)?;
+        if updated == 0 {
+          let pruned: bool = tx
+            .query_row(
+              "SELECT COALESCE(MAX(rowid) >= ?1, 0) FROM actions",
+              [row_id + RETAINED],
+              |row| row.get(0),
+            )
+            .map_err(io::Error::other)?;
+          if !pruned {
+            return Err(io::Error::other(
+              "activity request disappeared from history",
+            ));
+          }
+        }
+        tx.commit().map_err(io::Error::other)?;
+        Ok(())
+      })
+      .map_err(|error| {
+        ctream_driver::UnconfirmedDelivery::error(io::Error::other(format!(
+          "the action may already have run and its recorded outcome is unknown: {error}"
+        )))
+      })
+  }
+}
+
+fn valid_uuid(id: &str) -> bool {
+  Uuid::try_parse(id).is_ok_and(|uuid| uuid.to_string() == id)
+}
+
+fn initialize_writer(db: &mut Connection) -> io::Result<()> {
+  let tx = db
+    .transaction_with_behavior(TransactionBehavior::Immediate)
+    .map_err(io::Error::other)?;
+  if !initialized(&tx)? {
+    tx.execute_batch(
+      "CREATE TABLE actions (
+        action_id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+        timestamp_ms INTEGER NOT NULL, target TEXT NOT NULL, window_id TEXT, operation TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('unknown','failed','succeeded'))
+      ) STRICT;"
+    ).map_err(io::Error::other)?;
+    tx.pragma_update(None, "application_id", APPLICATION_ID)
+      .map_err(io::Error::other)?;
+    tx.pragma_update(None, "user_version", 1)
+      .map_err(io::Error::other)?;
+  }
+  // Side tables keep the existing 'activity' rows and read-only clients compatible.
+  tx.execute_batch(
+    "CREATE TABLE IF NOT EXISTS action_context (
+       action_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, turn_ref TEXT
+     ) STRICT;
+     CREATE TRIGGER IF NOT EXISTS prune_action_context AFTER DELETE ON actions
+     BEGIN DELETE FROM action_context WHERE action_id = OLD.action_id; END;
+     CREATE TABLE IF NOT EXISTS action_refusals (
+       action_id TEXT PRIMARY KEY, refusal_code TEXT NOT NULL
+         CHECK(refusal_code IN ('busy','stale_turn')), owner_id TEXT
+     ) STRICT;
+     CREATE TRIGGER IF NOT EXISTS prune_action_refusals AFTER DELETE ON actions
+     BEGIN DELETE FROM action_refusals WHERE action_id = OLD.action_id; END;",
+  )
+  .map_err(io::Error::other)?;
+  tx.commit().map_err(io::Error::other)
+}
+
+#[cfg(unix)]
+fn host_account_id() -> io::Result<String> {
+  Ok(format!("uid:{}", rustix::process::geteuid().as_raw()))
+}
+
+#[cfg(windows)]
+fn host_account_id() -> io::Result<String> {
+  crate::daemon::host_account_id()
 }
 
 fn state_directory() -> io::Result<PathBuf> {
@@ -271,9 +476,21 @@ struct Entry {
   window_id: Option<String>,
   operation: String,
   status: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  account_id: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  turn_ref: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  refusal_code: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  owner_id: Option<String>,
 }
 
 fn recent(base: &Path, limit: usize) -> io::Result<Vec<Entry>> {
+  recent_with_context(base, limit, false)
+}
+
+fn recent_with_context(base: &Path, limit: usize, details: bool) -> io::Result<Vec<Entry>> {
   if !(1..=MAX_RECENT).contains(&limit) {
     return Err(io::Error::new(
       io::ErrorKind::InvalidInput,
@@ -287,12 +504,39 @@ fn recent(base: &Path, limit: usize) -> io::Result<Vec<Entry>> {
   if !initialized(&db)? {
     return Ok(Vec::new());
   }
-  let mut query = db
-    .prepare(
-      "SELECT action_id,session_id,agent_id,timestamp_ms,target,window_id,operation,status
-    FROM actions ORDER BY rowid DESC LIMIT ?1",
+  let (context, refusals) = if details {
+    db.query_row(
+      "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='action_context'),
+              EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='action_refusals')",
+      [],
+      |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
     )
-    .map_err(io::Error::other)?;
+    .map_err(io::Error::other)?
+  } else {
+    (false, false)
+  };
+  let (account_fields, account_join) = if context {
+    (
+      "c.account_id,c.turn_ref",
+      "LEFT JOIN action_context c ON c.action_id=a.action_id",
+    )
+  } else {
+    ("NULL,NULL", "")
+  };
+  let (refusal_fields, refusal_join) = if refusals {
+    (
+      "r.refusal_code,r.owner_id",
+      "LEFT JOIN action_refusals r ON r.action_id=a.action_id",
+    )
+  } else {
+    ("NULL,NULL", "")
+  };
+  let sql = format!(
+    "SELECT a.action_id,a.session_id,a.agent_id,a.timestamp_ms,a.target,a.window_id,a.operation,a.status,
+            {account_fields},{refusal_fields} FROM actions a {account_join} {refusal_join}
+     ORDER BY a.rowid DESC LIMIT ?1"
+  );
+  let mut query = db.prepare(&sql).map_err(io::Error::other)?;
   query
     .query_map([limit as i64], |row| {
       Ok(Entry {
@@ -304,6 +548,10 @@ fn recent(base: &Path, limit: usize) -> io::Result<Vec<Entry>> {
         window_id: row.get(5)?,
         operation: row.get(6)?,
         status: row.get(7)?,
+        account_id: row.get(8)?,
+        turn_ref: row.get(9)?,
+        refusal_code: row.get(10)?,
+        owner_id: row.get(11)?,
       })
     })
     .map_err(io::Error::other)?
@@ -311,259 +559,19 @@ fn recent(base: &Path, limit: usize) -> io::Result<Vec<Entry>> {
     .map_err(io::Error::other)
 }
 
-/// Write recent actions in host dispatch order, newest first. Missing history is empty.
+pub fn write_recent_details(mut output: impl Write, limit: usize) -> io::Result<()> {
+  serde_json::to_writer(
+    &mut output,
+    &recent_with_context(&state_directory()?, limit, true)?,
+  )?;
+  output.write_all(b"\n")
+}
+
+/// Write recent requests in host journal order, newest first. Missing history is empty.
 pub fn write_recent(mut output: impl Write, limit: usize) -> io::Result<()> {
   serde_json::to_writer(&mut output, &recent(&state_directory()?, limit)?)?;
   output.write_all(b"\n")
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use std::{
-    fs::TryLockError,
-    io::{BufRead, BufReader},
-    process::{Child, Command, Stdio},
-  };
-
-  struct Fixture(PathBuf);
-
-  struct TestProcess(Child);
-
-  impl Drop for TestProcess {
-    fn drop(&mut self) {
-      if !matches!(self.0.try_wait(), Ok(Some(_))) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-      }
-    }
-  }
-
-  impl Fixture {
-    fn new() -> Self {
-      Self(std::env::temp_dir().join(format!("ctream-activity-test-{}", Uuid::new_v4())))
-    }
-
-    fn journal(&self) -> Journal {
-      Journal::at(self.0.clone())
-    }
-
-    fn child(&self, mode: &str) -> TestProcess {
-      TestProcess(
-        Command::new(std::env::current_exe().unwrap())
-          .args(["--exact", "activity::tests::subprocess", "--nocapture"])
-          .env("CTREAM_ACTIVITY_TEST_BASE", &self.0)
-          .env("CTREAM_ACTIVITY_TEST_MODE", mode)
-          .stdout(Stdio::piped())
-          .spawn()
-          .unwrap(),
-      )
-    }
-  }
-
-  impl Drop for Fixture {
-    fn drop(&mut self) {
-      let _ = fs::remove_dir_all(&self.0);
-    }
-  }
-
-  #[test]
-  fn subprocess() {
-    let Some(base) = std::env::var_os("CTREAM_ACTIVITY_TEST_BASE") else {
-      return;
-    };
-    let mut journal = Journal::at(base.into());
-    match std::env::var("CTREAM_ACTIVITY_TEST_MODE").as_deref() {
-      Ok("crash") => {
-        journal
-          .record("worker", Target::X11(0), None, "click", || {
-            std::process::exit(42)
-          })
-          .unwrap();
-      }
-      Ok("contend") => {
-        let dir = prepare(&journal.base, false).unwrap();
-        let file = private_options()
-          .read(true)
-          .write(true)
-          .open(dir.join("activity.lock"))
-          .unwrap();
-        assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
-        println!("parent holds lock");
-        io::stdout().flush().unwrap();
-        let base = journal.base.clone();
-        journal
-          .record("worker", Target::X11(0), None, "click", || {
-            let rows = recent(&base, 2)?;
-            assert_eq!(rows[0].status, "unknown");
-            assert_eq!(rows[1].status, "succeeded");
-            Ok(())
-          })
-          .unwrap();
-      }
-      mode => panic!("unexpected test mode {mode:?}"),
-    }
-  }
-
-  #[test]
-  fn independent_processes_serialize_complete_actions_and_allow_live_reads() {
-    let fixture = Fixture::new();
-    let mut journal = fixture.journal();
-    let session_id = journal.session_id().to_owned();
-    let mut process = None;
-    journal
-      .record(
-        "first",
-        Target::WindowsDesktop,
-        Some("window-1"),
-        "drag",
-        || {
-          let rows = recent(&fixture.0, 2)?;
-          assert_eq!(rows.len(), 1);
-          assert_eq!(rows[0].status, "unknown");
-          let mut child = fixture.child("contend");
-          let mut stdout = BufReader::new(child.0.stdout.take().unwrap());
-          let mut line = String::new();
-          while !line.ends_with("parent holds lock\n") {
-            line.clear();
-            assert_ne!(
-              stdout.read_line(&mut line)?,
-              0,
-              "child exited before contending"
-            );
-          }
-          process = Some((child, stdout));
-          Ok(())
-        },
-      )
-      .unwrap();
-    let (mut child, _stdout) = process.unwrap();
-    assert!(child.0.wait().unwrap().success());
-    let rows = recent(&fixture.0, 2).unwrap();
-    assert_eq!(
-      (rows[0].agent_id.as_str(), rows[0].status.as_str()),
-      ("worker", "succeeded")
-    );
-    assert_eq!(
-      (rows[1].agent_id.as_str(), rows[1].target.as_str()),
-      ("first", "windows")
-    );
-    assert_eq!(rows[1].window_id.as_deref(), Some("window-1"));
-    assert_eq!(rows[1].session_id, session_id);
-    assert_ne!(rows[1].session_id, rows[0].session_id);
-    assert_ne!(rows[1].action_id, rows[0].action_id);
-  }
-
-  #[test]
-  fn interrupted_action_stays_unknown_and_driver_failure_stays_redacted() {
-    let fixture = Fixture::new();
-    assert_eq!(fixture.child("crash").0.wait().unwrap().code(), Some(42));
-    let mut journal = fixture.journal();
-    let error = journal
-      .record(
-        "second",
-        Target::Wayland(1),
-        Some("w-2"),
-        "set_text",
-        || Err(io::Error::other("sensitive detail")),
-      )
-      .unwrap_err();
-    assert_eq!(error.to_string(), "sensitive detail");
-    let rows = recent(&fixture.0, 2).unwrap();
-    assert_eq!(rows[0].status, "failed");
-    assert_eq!(rows[1].status, "unknown");
-    assert!(
-      !serde_json::to_string(&rows)
-        .unwrap()
-        .contains("sensitive detail")
-    );
-    assert_eq!(recent(&fixture.0, 1).unwrap().len(), 1);
-    assert!(recent(&fixture.0, MAX_RECENT + 1).is_err());
-    let other = Fixture::new();
-    assert!(recent(&other.0, 1).unwrap().is_empty());
-    assert!(!other.0.exists());
-  }
-
-  #[test]
-  fn outcome_write_error_keeps_the_committed_intent_unknown() {
-    let fixture = Fixture::new();
-    let error = fixture
-      .journal()
-      .record("worker", Target::X11(0), None, "click", || {
-        let db = open_db(&prepare(&fixture.0, false)?, true)?;
-        db.execute_batch(
-          "CREATE TRIGGER fail_outcome BEFORE UPDATE ON actions
-        BEGIN SELECT RAISE(FAIL,'simulated write failure'); END",
-        )
-        .map_err(io::Error::other)
-      })
-      .unwrap_err();
-    assert!(error.to_string().contains("may already have run"));
-    assert_eq!(recent(&fixture.0, 1).unwrap()[0].status, "unknown");
-  }
-
-  #[test]
-  fn old_rows_are_pruned_when_the_next_intent_is_committed() {
-    let fixture = Fixture::new();
-    let mut journal = fixture.journal();
-    journal
-      .record("tester", Target::X11(1), None, "move", || Ok(()))
-      .unwrap();
-    let dir = prepare(&fixture.0, false).unwrap();
-    let db = open_db(&dir, true).unwrap();
-    db.execute("WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n < ?1)
-      INSERT INTO actions SELECT 'seed-' || n,'worker','tester',1,':1',NULL,'move','succeeded' FROM seq",
-      [RETAINED - 1]).unwrap();
-    journal
-      .record("tester", Target::X11(1), None, "move", || Ok(()))
-      .unwrap();
-    let count: i64 = db
-      .query_row("SELECT count(*) FROM actions", [], |row| row.get(0))
-      .unwrap();
-    assert_eq!(count, RETAINED);
-    let first: String = db
-      .query_row(
-        "SELECT action_id FROM actions ORDER BY rowid LIMIT 1",
-        [],
-        |row| row.get(0),
-      )
-      .unwrap();
-    assert_eq!(first, "seed-1");
-  }
-
-  #[cfg(unix)]
-  #[test]
-  fn unsafe_permissions_block_dispatch() {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = Fixture::new();
-    let dir = prepare(&fixture.0, true).unwrap();
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
-    let error = fixture
-      .journal()
-      .record("tester", Target::X11(0), None, "click", || {
-        panic!("dispatched")
-      })
-      .unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-  }
-
-  #[test]
-  fn unrelated_database_blocks_dispatch_and_preserves_contents() {
-    let fixture = Fixture::new();
-    let db = open_db(&prepare(&fixture.0, true).unwrap(), true).unwrap();
-    db.execute("CREATE TABLE existing(value TEXT)", []).unwrap();
-    let error = fixture
-      .journal()
-      .record("tester", Target::X11(0), None, "click", || {
-        panic!("dispatched")
-      })
-      .unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert_eq!(
-      db.query_row("SELECT name FROM sqlite_schema", [], |row| row
-        .get::<_, String>(0))
-        .unwrap(),
-      "existing"
-    );
-  }
-}
+mod tests;

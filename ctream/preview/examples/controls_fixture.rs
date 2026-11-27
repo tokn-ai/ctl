@@ -47,6 +47,7 @@ impl eframe::App for Fixture {
         text: "Synthetic frame",
         error: false,
         driver: None,
+        turn: None,
         debug: Some(self.debug),
       },
     );

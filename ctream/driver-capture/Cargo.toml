@@ -16,6 +16,7 @@ serde_json.workspace = true
 cc = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
 x11rb = { version = "0.14.0", features = ["composite", "image"] }
 
 [target.'cfg(windows)'.dependencies]

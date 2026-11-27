@@ -14,7 +14,7 @@ use std::{
   time::Duration,
 };
 
-// The broker reserializes the CLI arguments, including a 4096-byte options
+// The GUI worker reserializes the CLI arguments, including a 4096-byte options
 // JSON argument whose characters can expand during JSON escaping.
 const MAX_REQUEST: u64 = 32 * 1024;
 const MAX_CHUNK: usize = 64 * 1024;
@@ -64,6 +64,13 @@ fn authenticate(stream: &UnixStream) -> io::Result<()> {
   Ok(())
 }
 
+type Handler = fn(
+  &[String],
+  Option<&str>,
+  &mut BufReader<UnixStream>,
+  &mut Response,
+) -> ctream_driver::Result<()>;
+
 pub struct Listener {
   listener: UnixListener,
   path: PathBuf,
@@ -110,10 +117,7 @@ impl Listener {
     Ok(server)
   }
 
-  pub fn run(
-    self,
-    handle: fn(&[String], &mut BufReader<UnixStream>, &mut Response) -> ctream_driver::Result<()>,
-  ) -> io::Result<()> {
+  pub fn run(self, handle: Handler) -> io::Result<()> {
     for stream in self.listener.incoming() {
       let stream = match stream {
         Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -157,7 +161,12 @@ fn connect() -> io::Result<UnixStream> {
 
 fn serve_connection(
   stream: UnixStream,
-  handle: impl FnOnce(&[String], &mut BufReader<UnixStream>, &mut Response) -> ctream_driver::Result<()>,
+  handle: impl FnOnce(
+    &[String],
+    Option<&str>,
+    &mut BufReader<UnixStream>,
+    &mut Response,
+  ) -> ctream_driver::Result<()>,
 ) -> io::Result<()> {
   stream.set_read_timeout(Some(COMMAND_TIMEOUT))?;
   stream.set_write_timeout(Some(COMMAND_TIMEOUT))?;
@@ -172,9 +181,24 @@ fn serve_connection(
     if line.last() != Some(&b'\n') {
       return Err("incomplete or oversized ctream agent request".into());
     }
-    let arguments: Vec<String> = serde_json::from_slice(&line)?;
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Request {
+      Legacy(Vec<String>),
+      Controlled {
+        arguments: Vec<String>,
+        delegation: Option<String>,
+      },
+    }
+    let (arguments, delegation) = match serde_json::from_slice(&line)? {
+      Request::Legacy(args) => (args, None),
+      Request::Controlled {
+        arguments,
+        delegation,
+      } => (arguments, delegation),
+    };
     input.get_ref().set_read_timeout(None)?;
-    handle(&arguments, &mut input, &mut response)
+    handle(&arguments, delegation.as_deref(), &mut input, &mut response)
   })();
   response
     .into_inner()
@@ -184,7 +208,19 @@ fn serve_connection(
 
 pub fn relay(arguments: &[String]) -> io::Result<()> {
   let mut stream = connect()?;
-  let mut request = serde_json::to_vec(arguments)?;
+  // Older GUI workers cannot validate desktop admission. Use a distinct
+  // private envelope for every mutation so such workers fail before delivery.
+  let mutating = matches!(
+    arguments.get(1).map(String::as_str),
+    Some("input" | "input-sync" | "input-window" | "session-input" | "viewer-input")
+  );
+  let mut request = if mutating {
+    serde_json::to_vec(
+      &serde_json::json!({"arguments":arguments,"delegation":std::env::var("CTREAM_INPUT_DELEGATION").ok()}),
+    )?
+  } else {
+    serde_json::to_vec(arguments)?
+  };
   request.push(b'\n');
   if request.len() as u64 > MAX_REQUEST {
     return Err(io::Error::other("ctream agent request exceeds size limit"));
@@ -195,7 +231,7 @@ pub fn relay(arguments: &[String]) -> io::Result<()> {
     let _ = io::copy(&mut io::stdin().lock(), &mut stream);
     let _ = stream.shutdown(Shutdown::Write);
   });
-  receive(BufReader::new(incoming), io::stdout().lock())
+  receive(BufReader::new(incoming), io::stdout().lock(), mutating)
 }
 
 // The private socket carries stdout bytes and a terminal result separately.
@@ -239,23 +275,32 @@ impl Write for Reply {
   }
 }
 
-fn receive(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
+fn receive(mut input: impl Read, mut output: impl Write, mutating: bool) -> io::Result<()> {
+  // The parent SDK decides whether a mutation was in flight. Preserve a
+  // transport loss across this private hop, distinct from a GUI worker refusal.
+  let lost = |error| {
+    if mutating {
+      ctream_driver::UnconfirmedDelivery::error(error)
+    } else {
+      error
+    }
+  };
   let mut bytes = vec![0; MAX_CHUNK];
   loop {
     let mut header = [0; 5];
     input.read_exact(&mut header).map_err(|error| {
-      if error.kind() == io::ErrorKind::UnexpectedEof {
+      lost(if error.kind() == io::ErrorKind::UnexpectedEof {
         io::Error::other("desktop ctream agent closed the request without a result")
       } else {
         error
-      }
+      })
     })?;
     let [tag, a, b, c, d] = header;
     let count = u32::from_be_bytes([a, b, c, d]) as usize;
     let chunk = bytes
       .get_mut(..count)
-      .ok_or_else(|| io::Error::other("oversized ctream agent response chunk"))?;
-    input.read_exact(chunk)?;
+      .ok_or_else(|| lost(io::Error::other("oversized ctream agent response chunk")))?;
+    input.read_exact(chunk).map_err(lost)?;
     match tag {
       DATA => {
         output.write_all(chunk)?;
@@ -267,7 +312,11 @@ fn receive(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
           String::from_utf8_lossy(chunk).into_owned(),
         ));
       }
-      _ => return Err(io::Error::other("unknown ctream agent response chunk")),
+      _ => {
+        return Err(lost(io::Error::other(
+          "unknown ctream agent response chunk",
+        )));
+      }
     }
   }
 }
@@ -280,7 +329,8 @@ mod tests {
   fn replies_preserve_data_and_a_terminal_failure_after_startup() {
     let (mut client, server) = UnixStream::pair().unwrap();
     let server = thread::spawn(move || {
-      serve_connection(server, |arguments, input, output| {
+      serve_connection(server, |arguments, delegation, input, output| {
+        assert!(delegation.is_none());
         assert_eq!(arguments, ["version", "operation"]);
         let mut data = Vec::new();
         input.read_to_end(&mut data)?;
@@ -296,7 +346,7 @@ mod tests {
     client.shutdown(Shutdown::Write).unwrap();
     let mut output = Vec::new();
     assert_eq!(
-      receive(client, &mut output).unwrap_err().to_string(),
+      receive(client, &mut output, false).unwrap_err().to_string(),
       "capture failed"
     );
     assert_eq!(output, b"result");
@@ -305,6 +355,7 @@ mod tests {
 
   #[test]
   fn a_missing_terminal_result_is_a_failure() {
-    assert!(receive([].as_slice(), io::sink()).is_err());
+    let error = receive([].as_slice(), io::sink(), true).unwrap_err();
+    assert!(ctream_driver::UnconfirmedDelivery::is(&error));
   }
 }

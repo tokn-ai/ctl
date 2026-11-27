@@ -14,12 +14,11 @@ use core_foundation::{
 };
 use ctream_agent::{
   capture,
+  native_input::{self, Gate, Mode},
   protocol::{Request, TargetOperation, parse},
   runtime::{capture_started, capture_video_started, input_capabilities, video_capabilities},
 };
-use ctream_driver::{
-  CaptureCancellation, CaptureLifetime, CaptureOptions, CaptureSource, Frame, Result,
-};
+use ctream_driver::{CaptureLifetime, CaptureOptions, CaptureSource, Frame, Result};
 use ctream_driver_capture::macos::screen_capture_kit::{self, Capture, Event};
 use ctream_driver_input::macos::{WindowIdentity, WindowInput, has_access};
 use ctream_proto::{
@@ -28,15 +27,11 @@ use ctream_proto::{
 use dispatch2::{DispatchQueue, MainThreadBound, run_on_main};
 use std::{
   ffi::c_void,
-  io::{self, BufRead, BufReader, Read, Write},
+  io::{self, BufReader, Read, Write},
   net::Shutdown,
   os::unix::net::UnixStream,
   ptr,
-  sync::{
-    Arc, Condvar, Mutex,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-  },
+  sync::{Arc, LazyLock, mpsc},
   thread,
   time::Duration,
 };
@@ -45,14 +40,23 @@ pub fn run(arguments: &[String]) -> Result<()> {
   if arguments == ["serve"] {
     return serve();
   }
-  // The SSH-side process owns the action journal. Native window access
-  // continues to run in the logged-in user's GUI broker.
+  // SSH sessions submit input to the desktop daemon. ScreenCaptureKit and
+  // native delivery run in the permission-bearing GUI worker.
   match parse(arguments)? {
-    Request::AttributedSession {
+    Request::ViewerLane(target, window, lane) => crate::viewer::run(target, window, lane),
+    Request::LiveRoom {
+      turns,
+      authoritative,
       target,
       agent_id,
       window,
-    } => crate::attributed::run(target, agent_id, window),
+    } => crate::live_room(target, agent_id, window, turns, authoritative),
+    Request::AttributedSession {
+      protocol,
+      target,
+      agent_id,
+      window,
+    } => crate::attributed::serve(target, agent_id, window, protocol),
     _ => Ok(socket::relay(arguments)?),
   }
 }
@@ -109,21 +113,74 @@ fn serve() -> Result<()> {
 
 fn handle(
   arguments: &[String],
+  delegation: Option<&str>,
   input: &mut BufReader<UnixStream>,
   output: &mut Response,
 ) -> Result<()> {
   match parse(arguments)? {
     Request::Ping => ping(input, output),
     Request::InputCapabilities => input_capabilities(output),
-    Request::InputSync(Target::MacosDesktop, Some(id)) => {
-      forward_input(id, None, input, output, true)
+    Request::ViewerInput {
+      target: Target::MacosDesktop,
+      label,
+      window: Some(id),
+      receipts,
+    } => forward_input(
+      id,
+      None,
+      input,
+      output,
+      Mode::Viewer { receipts },
+      Some(label),
+      delegation,
+    ),
+    Request::InputSync(Target::MacosDesktop, Some(id)) => forward_input(
+      id,
+      None,
+      input,
+      output,
+      Mode::Synchronized,
+      None,
+      delegation,
+    ),
+    Request::ViewerCapture {
+      window,
+      lease,
+      driver,
+      video,
+    } => {
+      let selection = capture::select(Target::MacosDesktop, driver, true)?;
+      let format = match video {
+        Some(request) => WindowStream::Video(selection.id, request),
+        None => WindowStream::WithMetadata(selection.id),
+      };
+      stream_window(window, Some(lease), format, input, output)
     }
+    Request::LeasedViewerInput {
+      window,
+      lease,
+      label,
+    } => forward_input(
+      window,
+      Some(lease),
+      input,
+      output,
+      Mode::Viewer { receipts: true },
+      Some(label),
+      delegation,
+    ),
     Request::SessionCapture { window, lease } => {
       stream_window(window, Some(lease), WindowStream::Raw, input, output)
     }
-    Request::SessionInput { window, lease } => {
-      forward_input(window, Some(lease), input, output, true)
-    }
+    Request::SessionInput { window, lease } => forward_input(
+      window,
+      Some(lease),
+      input,
+      output,
+      Mode::Synchronized,
+      None,
+      delegation,
+    ),
     Request::VideoCapabilities => video_capabilities(output),
     Request::Discover { macos, .. } => {
       let sessions = if macos {
@@ -198,7 +255,7 @@ fn handle(
       stream_window(id, None, WindowStream::Raw, input, output)
     }
     Request::Target(Target::MacosDesktop, TargetOperation::InputWindow(id)) => {
-      forward_input(id, None, input, output, false)
+      forward_input(id, None, input, output, Mode::Legacy, None, delegation)
     }
     _ => Err("the macOS desktop agent supports macOS windows".into()),
   }
@@ -248,65 +305,39 @@ fn window_identity(id: &str) -> io::Result<WindowIdentity> {
 
 static CAPTURES: CaptureRegistry = CaptureRegistry::new();
 
-#[derive(Default)]
-struct CaptureEvents {
-  latest: Option<Frame>,
-  finished: Option<io::Result<()>>,
+// ScreenCaptureKit handles stay in the permissioned GUI host. A subscriber owns
+// a separate input lease even when another subscriber uses the same stream.
+type WindowSources = capture::pool::Pool<(u32, i32, u16)>;
+static SOURCES: LazyLock<WindowSources> = LazyLock::new(WindowSources::default);
+
+struct WindowFrames {
+  subscriber: capture::pool::Subscription,
+  session: Arc<CaptureSession>,
 }
 
-#[derive(Default)]
-struct Frames {
-  events: Mutex<CaptureEvents>,
-  ready: Condvar,
-}
-
-impl Frames {
-  fn publish(&self, event: Event) {
-    let mut events = self.events.lock().unwrap();
-    if events.finished.is_some() {
-      return;
-    }
-    match event {
-      Event::Frame { size, pixels } => events.latest = Some(Frame { size, pixels }),
-      Event::Cancelled | Event::Finished => events.finished = Some(Ok(())),
-      Event::Failed(error) => events.finished = Some(Err(io::Error::other(error))),
-    }
-    self.ready.notify_one();
-  }
-
-  fn next(&self, cancellation: &CaptureCancellation) -> io::Result<Option<Frame>> {
-    let mut events = self.events.lock().unwrap();
-    loop {
-      if let Some(finished) = events.finished.take() {
-        return finished.map(|()| None);
-      }
-      if cancellation.is_cancelled() {
-        return Ok(None);
-      }
-      if let Some(frame) = events.latest.take() {
-        return Ok(Some(frame));
-      }
-      // Encoder failure can cancel capture without a ScreenCaptureKit callback.
-      (events, _) = self
-        .ready
-        .wait_timeout(events, Duration::from_millis(50))
-        .unwrap();
-    }
-  }
-}
-
-impl CaptureSource for &Frames {
-  fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
+impl CaptureSource for WindowFrames {
+  fn run<W: Write + Send>(mut self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+      .enable_time()
+      .build()?;
     let cancellation = lifetime.cancellation();
-    while let Some(Frame {
-      size: [width, height],
-      pixels,
-    }) = self.next(&cancellation)?
-    {
-      write!(output, "P6\n{width} {height}\n255\n")?;
-      output.write_all(&pixels)?;
-      output.flush()?;
-    }
+    runtime.block_on(async {
+      while !cancellation.is_cancelled() {
+        match tokio::time::timeout(Duration::from_millis(50), self.subscriber.next()).await {
+          Err(_) => continue,
+          Ok(Ok(None)) => break,
+          Ok(Err(error)) => return Err(error),
+          Ok(Ok(Some(frame))) => {
+            let [width, height] = frame.size;
+            self.session.received_frame();
+            write!(output, "P6\n{width} {height}\n255\n")?;
+            output.write_all(&frame.pixels)?;
+            output.flush()?;
+          }
+        }
+      }
+      Ok::<(), io::Error>(())
+    })?;
     Ok(())
   }
 }
@@ -334,33 +365,54 @@ fn stream_window(
     .find(|window| window.id == identity.id && window.pid == identity.pid)
     .ok_or("the selected macOS window is no longer available")?;
 
-  let frames = Arc::new(Frames::default());
-  let publishing = Arc::clone(&frames);
-  let session = Arc::new(CaptureSession::new(identity));
-  let lifecycle = Arc::clone(&session);
-  let independent = lease.is_some();
-  let capture = run_on_main(move |main_thread| {
-    let callback = move |event| {
-      if matches!(event, Event::Frame { .. }) {
-        lifecycle.received_frame();
-      } else {
-        lifecycle.end();
+  let subscriber = SOURCES.subscribe(
+    (
+      identity.id,
+      identity.pid,
+      capture_options.map_or(screen_capture_kit::DEFAULT_MAX_FPS, CaptureOptions::max_fps),
+    ),
+    move |publishing, lifetime| {
+      let (end, finished) = mpsc::channel();
+      let _capture = run_on_main(move |main_thread| {
+        let callback = move |event| match event {
+          Event::Frame { size, pixels } => {
+            publishing.publish(Frame { size, pixels });
+          }
+          Event::Cancelled | Event::Finished => {
+            publishing.end();
+            let _ = end.send(Ok(()));
+          }
+          Event::Failed(error) => {
+            publishing.end();
+            let _ = end.send(Err(io::Error::other(error)));
+          }
+        };
+        match capture_options {
+          Some(options) => Capture::start_session_window_with_options(&window, options, callback),
+          None => Capture::start_session_window(&window, callback),
+        }
+        .map(|capture| MainThreadBound::new(capture, main_thread))
+      })?;
+      while !lifetime.cancelled(Duration::from_millis(20)) {
+        match finished.try_recv() {
+          Ok(result) => return result,
+          Err(mpsc::TryRecvError::Disconnected) => break,
+          Err(mpsc::TryRecvError::Empty) => {}
+        }
       }
-      publishing.publish(event);
-    };
-    match (independent, capture_options) {
-      (true, _) => Capture::start_session_window(&window, callback),
-      (false, Some(options)) => Capture::start_window_with_options(&window, options, callback),
-      (false, None) => Capture::start_window(&window, callback),
-    }
-    .map(|capture| MainThreadBound::new(capture, main_thread))
-  })?;
+      Ok(())
+    },
+  )?;
+  let session = Arc::new(CaptureSession::new(identity, subscriber.status()));
   let _lease = CAPTURES.start(lease, Arc::clone(&session))?;
+  let frames = WindowFrames {
+    subscriber,
+    session: session.clone(),
+  };
   let capture_input = input.get_ref().try_clone()?;
   let (notify, closed) = mpsc::channel();
   let lifetime = CaptureLifetime::from_receiver(closed);
-  let result = thread::scope(|scope| {
-    let disconnected = Arc::clone(&frames);
+  thread::scope(|scope| {
     let lifecycle = Arc::clone(&session);
     let cancellation = lifetime.cancellation();
     scope.spawn(move || {
@@ -369,20 +421,15 @@ fn stream_window(
       let _ = input.read_exact(&mut [0]);
       lifecycle.end();
       cancellation.cancel();
-      disconnected.publish(Event::Cancelled);
       drop(notify);
     });
     let result = match stream {
-      WindowStream::Raw => frames.as_ref().run(output, &lifetime),
-      WindowStream::WithMetadata(driver) => capture_started(
-        frames.as_ref(),
-        driver,
-        CaptureFormat::Ppm,
-        output,
-        &lifetime,
-      ),
+      WindowStream::Raw => frames.run(output, &lifetime),
+      WindowStream::WithMetadata(driver) => {
+        capture_started(frames, driver, CaptureFormat::Ppm, output, &lifetime)
+      }
       WindowStream::Video(driver, request) => capture_video_started(
-        frames.as_ref(),
+        frames,
         driver,
         CaptureFormat::Ppm,
         request,
@@ -393,9 +440,7 @@ fn stream_window(
     session.end();
     let _ = capture_input.shutdown(Shutdown::Read);
     result
-  });
-  drop(capture);
-  result
+  })
 }
 
 fn forward_input(
@@ -403,55 +448,42 @@ fn forward_input(
   lease: Option<&str>,
   input: &mut BufReader<UnixStream>,
   output: &mut impl Write,
-  synchronized: bool,
+  mode: Mode,
+  label: Option<&str>,
+  delegation: Option<&str>,
 ) -> Result<()> {
-  static INPUT_OPEN: AtomicBool = AtomicBool::new(false);
-  struct ReleaseInput;
-  impl Drop for ReleaseInput {
-    fn drop(&mut self) {
-      INPUT_OPEN.store(false, Ordering::Release);
-    }
-  }
-  let _legacy_input = if lease.is_none() {
-    if INPUT_OPEN.swap(true, Ordering::AcqRel) {
-      return Err("a macOS window input channel is already open".into());
-    }
-    Some(ReleaseInput)
-  } else {
-    None
+  let Some(key) = delegation else {
+    let authority = native_input::controller(Target::MacosDesktop, Some(id), label, None)?;
+    return Ok(native_input::serve_controller(
+      mode, authority, None, lease, input, output,
+    )?);
   };
+  let mut gate = Gate::delegated(Target::MacosDesktop, Some(id), key)?;
   let identity = window_identity(id)?;
   let input_lease = CAPTURES.attach(lease, identity, input.get_ref())?;
-  let mut control = WindowInput::open_with_delivery(identity, synchronized)?;
+  let mut control = WindowInput::open_with_delivery(identity, mode != Mode::Legacy)?;
   if input_lease.ended() {
     return Err("the active macOS window capture has ended".into());
   }
   output.write_all(b"ready\n")?;
   output.flush()?;
-  let mut line = String::new();
-  loop {
-    line.clear();
-    let count = input.by_ref().take(129).read_line(&mut line)?;
-    if count == 0 || input_lease.ended() {
-      control.reset()?;
-      return Ok(());
+  let control_socket = input.get_ref().try_clone()?;
+  let input = std::mem::replace(input, BufReader::new(control_socket.try_clone()?));
+  let received = native_input::receive(mode, &mut gate, input, output, |commands| {
+    if input_lease.ended() {
+      return Err(io::Error::other(
+        "the active macOS window capture has ended",
+      ));
     }
-    if count > 128 || !line.ends_with('\n') {
-      return Err("input command exceeds 128 bytes or is incomplete".into());
+    for command in commands {
+      control.dispatch(command)?;
     }
-    let fields: Vec<_> = line.split_ascii_whitespace().collect();
-    match fields.as_slice() {
-      ["sync"] if synchronized => {
-        output.write_all(b"ok\n")?;
-        output.flush()?;
-      }
-      ["move", x, y, width, height] => {
-        control.move_pointer(x.parse()?, y.parse()?, [width.parse()?, height.parse()?])?;
-      }
-      ["button", code, pressed @ ("0" | "1")] => control.button(code.parse()?, *pressed == "1")?,
-      ["key", name, pressed @ ("0" | "1")] => control.key(name, *pressed == "1")?,
-      ["reset"] => control.reset()?,
-      _ => return Err("unknown macOS input command".into()),
-    }
-  }
+    Ok(())
+  });
+  let _ = control_socket.shutdown(Shutdown::Read);
+  let released = control.reset();
+  drop(control);
+  let finished = gate.finish();
+  received.and(released).and(finished)?;
+  Ok(())
 }

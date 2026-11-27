@@ -1,8 +1,8 @@
-use ctream_driver::{ControlOperation, ControlSource, Result};
+use ctream_driver::{ControlOperation, ControlSource, Result, UnconfirmedDelivery};
 use ctream_proto::{Target, Window, valid_window_id};
 use std::{
-  io,
-  process::{Child, Command},
+  io::{self, Read, Write},
+  process::{Child, Command, Stdio},
 };
 
 /// An accessible window resolved through the selected compositor session.
@@ -33,13 +33,8 @@ impl Drop for RunningProcess {
   }
 }
 
-impl ControlSource for AtspiWindow {
-  fn run(self, operation: ControlOperation) -> Result<()> {
-    let operation = match operation {
-      ControlOperation::Inspect { bounds: true } => "elements-with-bounds",
-      ControlOperation::Inspect { bounds: false } => "elements",
-      ControlOperation::Act => "action",
-    };
+impl AtspiWindow {
+  fn command(&self, operation: &str) -> Command {
     let mut command = Command::new("python3");
     command.args([
       "-u",
@@ -49,7 +44,63 @@ impl ControlSource for AtspiWindow {
       &self.window.id,
       &self.window.title,
     ]);
-    let mut child = RunningProcess(command.spawn()?);
+    command
+  }
+
+  /// The host has already read the complete bounded request before admitting
+  /// this mutation. An idle or incomplete client cannot own the desktop.
+  pub fn apply(
+    &self,
+    request: &[u8],
+    prepare: impl FnOnce(&mut Command) -> io::Result<()>,
+  ) -> io::Result<Vec<u8>> {
+    let mut command = self.command("action");
+    prepare(&mut command)?;
+    let mut child = RunningProcess(
+      command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?,
+    );
+    let mut stdin = child.0.stdin.take().unwrap();
+    stdin.write_all(request)?;
+    drop(stdin);
+    let mut reply = Vec::new();
+    child
+      .0
+      .stdout
+      .take()
+      .unwrap()
+      .take(65537)
+      .read_to_end(&mut reply)
+      .map_err(UnconfirmedDelivery::error)?;
+    // Drop the reader above before waiting, including when the reply exceeded
+    // the bound and the helper was still writing.
+    if !child
+      .0
+      .wait()
+      .map_err(UnconfirmedDelivery::error)?
+      .success()
+      || reply.len() > 65536
+      || reply.is_empty()
+    {
+      return Err(UnconfirmedDelivery::error(io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        "semantic driver returned no complete outcome",
+      )));
+    }
+    Ok(reply)
+  }
+}
+
+impl ControlSource for AtspiWindow {
+  fn run(self, operation: ControlOperation) -> Result<()> {
+    let operation = match operation {
+      ControlOperation::Inspect { bounds: true } => "elements-with-bounds",
+      ControlOperation::Inspect { bounds: false } => "elements",
+      ControlOperation::Act => "action",
+    };
+    let mut child = RunningProcess(self.command(operation).spawn()?);
     let status = child.0.wait()?;
     if !status.success() {
       return Err(io::Error::other(format!("operation backend exited with {status}")).into());

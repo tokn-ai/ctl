@@ -36,21 +36,7 @@ impl<R: Read> FrameReader<R> {
         if self.at_eof()? {
           return Ok(false);
         }
-        if header_line(&mut self.reader)?.trim_end() != "P6" {
-          return Err(io::Error::other("expected a P6 RGB frame"));
-        }
-        let dimensions = header_line(&mut self.reader)?;
-        let mut parts = dimensions.split_ascii_whitespace();
-        let mut dimension = || {
-          parts
-            .next()
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(|| io::Error::other("invalid PPM frame size"))
-        };
-        let size = [dimension()?, dimension()?];
-        if parts.next().is_some() || header_line(&mut self.reader)?.trim_end() != "255" {
-          return Err(io::Error::other("unsupported PPM frame"));
-        }
+        let size = ppm_dimensions(&mut self.reader)?;
         (size, pixel_count(size)?)
       }
     };
@@ -69,6 +55,29 @@ impl<R: Read> FrameReader<R> {
       }
     }
   }
+}
+
+/// Parse the bounded, three-line header of an RGB24 image.
+///
+/// # Errors
+/// Returns an error for truncated headers or unsupported dimensions or color format.
+pub fn ppm_dimensions(reader: &mut impl BufRead) -> io::Result<[usize; 2]> {
+  if header_line(reader)?.trim_end() != "P6" {
+    return Err(io::Error::other("expected a P6 RGB frame"));
+  }
+  let dimensions = header_line(reader)?;
+  let mut parts = dimensions.split_ascii_whitespace();
+  let mut dimension = || {
+    parts
+      .next()
+      .and_then(|value| value.parse::<usize>().ok())
+      .ok_or_else(|| io::Error::other("invalid PPM frame size"))
+  };
+  let size = [dimension()?, dimension()?];
+  if parts.next().is_some() || header_line(reader)?.trim_end() != "255" {
+    return Err(io::Error::other("unsupported PPM frame"));
+  }
+  Ok(size)
 }
 
 fn header_line(reader: &mut impl BufRead) -> io::Result<String> {

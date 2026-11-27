@@ -1,5 +1,6 @@
 """X11 input endpoint. Run on the selected display with commands on stdin."""
 import ctypes as c
+import os
 import sys
 
 
@@ -96,6 +97,10 @@ try:
     elif synchronized:
       raise ValueError("unknown X11 input command")
     flush(display)
+except (ValueError, RuntimeError):
+  if synchronized and os.environ.get("CTREAM_INPUT_WORKER") == "1":
+    print("refused", flush=True)
+  raise
 finally:
   try:
     release()

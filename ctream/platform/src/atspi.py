@@ -141,13 +141,22 @@ def run(operation, window_id, title):
     names = action_names(node)
     if not 0 <= index < len(names) or names[index] != request["name"]:
       raise ValueError("Selected action is no longer available")
-    applied = node.do_action(index)
+    dispatch = node.do_action
+    argument = index
   elif request["operation"] == "set_text":
     if not node.is_editable_text():
       raise ValueError("Element no longer supports text editing")
-    applied = node.set_text_contents(request["text"])
+    dispatch = node.set_text_contents
+    argument = request["text"]
   else:
     raise ValueError("Unknown action")
+  try:
+    applied = dispatch(argument)
+  except Exception as error:
+    # The application may already have acted before its D-Bus reply was lost.
+    # A missing result leaves host delivery unconfirmed. A returned false below
+    # is an explicit refusal.
+    sys.exit(f"AT-SPI action returned no acknowledgement: {error}")
   return dict(applied=bool(applied), error=None if applied else "Application rejected the action")
 
 

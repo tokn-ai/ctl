@@ -21,6 +21,27 @@ use process_wrap::std::{ChildWrapper, CommandWrap, JobObject};
 const STDERR_LIMIT: usize = 4 * 1024;
 const STDERR_GRACE: Duration = Duration::from_millis(100);
 
+/// The agent reported a terminal refusal, as opposed to a lost channel or
+/// an unconfirmed outcome returned by a nested driver.
+#[derive(Debug)]
+struct AgentRefusal(String);
+
+impl std::fmt::Display for AgentRefusal {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.0)
+  }
+}
+
+impl std::error::Error for AgentRefusal {}
+
+pub(crate) fn after_dispatch(error: io::Error) -> io::Error {
+  if error.get_ref().is_some_and(|e| e.is::<AgentRefusal>()) {
+    error
+  } else {
+    ctream_driver::UnconfirmedDelivery::error(error)
+  }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests;
 
@@ -265,7 +286,7 @@ impl Process {
     true
   }
 
-  fn wait(&self, report_diagnostics: bool) -> io::Result<()> {
+  fn wait(&self, report_diagnostics: bool, delegated: bool) -> io::Result<()> {
     loop {
       let status = self
         .child
@@ -282,6 +303,9 @@ impl Process {
           message.push('\n');
           message.push_str(&diagnostic);
         }
+        if delegated && status.code() == Some(i32::from(ctream_driver::DELEGATED_FAILURE_EXIT)) {
+          return Err(io::Error::other(AgentRefusal(message)));
+        }
         return Err(io::Error::other(message));
       }
       thread::sleep(Duration::from_millis(10));
@@ -295,6 +319,17 @@ pub trait Transport {
   type Writer: io::Write + Send + 'static;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>>;
+}
+
+/// A pre-dispatch protocol rejection from a host that predates this operation.
+pub fn unsupported_operation(error: &io::Error) -> bool {
+  error.to_string().lines().last().is_some_and(|line| {
+    matches!(
+      line.strip_prefix("ctream-agent: ").unwrap_or(line),
+      "usage: ctream-agent VERSION OPERATION [DISPLAY [WINDOW]]"
+        | "usage: ctream-agent VERSION OPERATION"
+    )
+  })
 }
 
 pub struct Ssh(pub String);
@@ -501,6 +536,7 @@ fn packaged_tools(agent: &Path) -> Option<&Path> {
 pub struct ProcessReader {
   process: Arc<Process>,
   stdout: ChildStdout,
+  delegated: bool,
 }
 
 impl Read for ProcessReader {
@@ -511,7 +547,7 @@ impl Read for ProcessReader {
     let count = self.stdout.read(buffer)?;
     if count == 0 {
       let report_diagnostics = self.process.close();
-      self.process.wait(report_diagnostics)?;
+      self.process.wait(report_diagnostics, self.delegated)?;
     }
     Ok(count)
   }
@@ -562,7 +598,11 @@ fn spawn_with_stderr(
   });
   let cleanup = Arc::clone(&process);
   Ok(Channel {
-    reader: ProcessReader { process, stdout },
+    reader: ProcessReader {
+      process,
+      stdout,
+      delegated: false,
+    },
     writer,
     cancellation: Cancellation::new(move || {
       cleanup.close();
@@ -597,8 +637,58 @@ impl Transport for Local {
   type Writer = ChildStdin;
 
   fn open(&self, arguments: &[String]) -> io::Result<Channel<Self::Reader, Self::Writer>> {
+    self.open_child(arguments, None)
+  }
+}
+
+impl Local {
+  /// Open a host-owned child. A delegated child still obtains admission from
+  /// the desktop daemon before touching the selected input backend.
+  pub fn open_delegated(
+    &self,
+    arguments: &[String],
+    key: &str,
+  ) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+    self.open_child(arguments, Some(key))
+  }
+
+  fn open_child(
+    &self,
+    arguments: &[String],
+    delegation: Option<&str>,
+  ) -> io::Result<Channel<ProcessReader, ChildStdin>> {
+    #[cfg(windows)]
+    if delegation.is_none()
+      && matches!(
+        arguments.get(1).map(String::as_str),
+        Some(
+          "capture"
+            | "capture-window"
+            | "capture-with-driver"
+            | "capture-stream"
+            | "live-room"
+            | "attributed-session"
+            | "turn-room"
+            | "turn-session"
+            | "viewer-input"
+            | "viewer-observe"
+            | "input"
+            | "input-window"
+            | "input-sync"
+            | "action"
+        )
+      )
+    {
+      // Launch the shared daemon outside the per-channel Windows job, so
+      // closing its first participant cannot terminate everyone else's room.
+      prepare_desktop_daemon(&self.agent)?;
+    }
     let mut command = Command::new(&self.agent);
     command.args(arguments);
+    command.env_remove("CTREAM_INPUT_DELEGATION");
+    if let Some(key) = delegation {
+      command.env("CTREAM_INPUT_DELEGATION", key);
+    }
     #[cfg(target_os = "linux")]
     if let Some(tools) = packaged_tools(&self.agent) {
       let inherited = std::env::var_os("PATH").unwrap_or_else(|| "/bin:/usr/bin".into());
@@ -608,8 +698,33 @@ impl Transport for Local {
         std::env::join_paths(paths).map_err(io::Error::other)?,
       );
     }
-    spawn(command)
+    let mut channel = spawn(command)?;
+    channel.reader.delegated = delegation.is_some();
+    Ok(channel)
   }
+}
+
+#[cfg(windows)]
+fn prepare_desktop_daemon(agent: &Path) -> io::Result<()> {
+  use std::os::windows::process::CommandExt;
+  let mut child = Command::new(agent)
+    .arg("ensure-daemon")
+    .creation_flags(0x08000000) // CREATE_NO_WINDOW
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()?;
+  let deadline = Instant::now() + Duration::from_secs(3);
+  while child.try_wait()?.is_none() {
+    if Instant::now() >= deadline {
+      let _ = child.kill();
+      let _ = child.wait();
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+  // Older agents can still handle attributed sessions.
+  Ok(())
 }
 
 #[cfg(test)]

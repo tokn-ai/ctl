@@ -15,6 +15,7 @@ mod drivers;
 mod fonts;
 mod input;
 mod latency;
+mod live;
 #[cfg(target_os = "macos")]
 mod macos_chrome;
 #[cfg(target_os = "macos")]
@@ -64,9 +65,11 @@ enum CaptureEnd {
 }
 
 struct Preview<T: Transport> {
+  live: Option<live::Live>,
   input: Option<input::Input<ctream_client::input::Input<T::Reader, T::Writer>>>,
   input_error: Option<String>,
   capture_lifetime: Option<CaptureLifetime<T::Writer>>,
+  capture_lease: Option<String>,
   stream: Arc<Mutex<Stream>>,
   texture: Option<egui::TextureHandle>,
   frames: u64,
@@ -87,12 +90,14 @@ impl<T: Transport> Preview<T> {
     options: VideoOptions,
     ctx: egui::Context,
     target: view::Repaint,
-  ) -> io::Result<Self> {
-    let capture = if let Some(driver) = driver {
-      session.capture_with_options(driver, options)?
-    } else {
-      session.capture()?
-    };
+  ) -> io::Result<Self>
+  where
+    T: Send + Sync + 'static,
+  {
+    let ctream_client::media::ViewerCapture {
+      capture,
+      lease: capture_lease,
+    } = session.viewer_capture(driver, options)?;
     let driver = capture.driver().map(str::to_owned);
     let format = capture.format();
     let video = capture.video().cloned();
@@ -100,6 +105,7 @@ impl<T: Transport> Preview<T> {
     let stream = Arc::new(Mutex::new(Stream::default()));
     let reader = Arc::clone(&stream);
     let watched = Arc::clone(&stream);
+    let live = live::Live::open(session, &ctx, target.clone());
     let repaint = view::capture_repaint(&ctx, target, move || {
       let stream = watched.lock().unwrap();
       view::PendingCapture::new(stream.frame.is_some(), stream.end.is_some())
@@ -132,9 +138,11 @@ impl<T: Transport> Preview<T> {
       let _ = repaint.try_send(());
     });
     Ok(Self {
+      live: Some(live),
       input: None,
       input_error: None,
       capture_lifetime: Some(lifetime),
+      capture_lease,
       stream,
       texture: None,
       frames: 0,
@@ -170,6 +178,7 @@ impl<T: Transport> Preview<T> {
       }
     }
     if end.is_some() {
+      self.live.take();
       // Capture and input use independent channels. End control as soon as
       // capture stops, even if the viewer still has a texture to show.
       self.input.take();
@@ -232,6 +241,9 @@ impl<T: Transport> Preview<T> {
     view::paint(ui, texture, area, &image);
     if error.is_none() {
       overlay::paint(ui.painter(), &image, elements);
+      if let Some(live) = &self.live {
+        live.paint(ui, &image);
+      }
     }
     Some(image)
   }
@@ -242,11 +254,16 @@ impl<T: Transport> Preview<T> {
     image: Option<&ImageGeometry>,
     pointer_regions: &[egui::Rect],
   ) {
-    if let Some(input) = &mut self.input
-      && let Err(error) = input.update(ctx, image, pointer_regions)
-    {
-      self.input = None;
-      self.input_error = Some(format!("Input disconnected ({error})"));
+    if let Some(input) = &mut self.input {
+      match input.update(ctx, image, pointer_regions) {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.input_error = Some(e.to_string()),
+        Err(error) => {
+          self.input = None;
+          self.input_error = Some(format!("Input disconnected ({error})"));
+        }
+        Ok(()) if input.delivered() => self.input_error = None,
+        Ok(()) => {}
+      }
     }
   }
 }
@@ -693,7 +710,7 @@ mod lifecycle_tests {
         view::Repaint::default(),
       )
       .unwrap();
-      preview.input = Some(input::Input::new(control));
+      preview.input = Some(input::Input::new(control, Default::default(), &context));
       let deadline = Instant::now() + Duration::from_secs(2);
       while preview.stream.lock().unwrap().end.is_none() {
         assert!(Instant::now() < deadline, "capture worker did not finish");

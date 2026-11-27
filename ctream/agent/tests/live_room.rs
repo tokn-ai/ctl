@@ -180,6 +180,7 @@ async fn one_desktop_connection_watches_multiple_sources_with_one_participant_id
 {
   use ctream_agent::daemon::SourceObserver;
   use std::path::Path;
+  use tokio::task::spawn_blocking;
   use tokio::time::timeout;
   let display = Target::X11(Uuid::new_v4().as_fields().0);
   let sources = [
@@ -213,15 +214,17 @@ async fn one_desktop_connection_watches_multiple_sources_with_one_participant_id
     assert_eq!(turn.window_id, *window);
     assert!(matches!(turn.event, LiveEvent::Turn { .. }));
   }
+  let participant = participant.unwrap();
   let mut watchers = Vec::new();
   for (_, window) in &sources {
-    let mut watcher = Watcher::open(display, window.as_deref().unwrap(), "peer");
-    assert!(
-      watcher
-        .snapshot()
-        .iter()
-        .any(|p| Some(&p.participant_id) == participant.as_ref())
-    );
+    let peer_window = window.clone().unwrap();
+    let (watcher, roster) = spawn_blocking(move || {
+      let mut watcher = Watcher::open(display, &peer_window, "peer");
+      let roster = watcher.snapshot();
+      (watcher, roster)
+    })
+    .await?;
+    assert!(roster.iter().any(|p| p.participant_id == participant));
     let joined = timeout(WAIT, observer.next_event()).await??.unwrap();
     assert_eq!(joined.window_id, *window);
     assert_eq!(
@@ -233,14 +236,17 @@ async fn one_desktop_connection_watches_multiple_sources_with_one_participant_id
     watchers.push(watcher);
   }
   drop(observer);
-  for mut watcher in watchers {
-    assert_eq!(
-      watcher.next(),
-      LiveEvent::Left {
-        participant_id: participant.clone().unwrap()
-      }
-    );
-    watcher.close();
-  }
+  // Windows needs the observer's I/O driver to finish closing the named pipe
+  // before the daemon can notify the waiting peers.
+  spawn_blocking(move || {
+    let left = LiveEvent::Left {
+      participant_id: participant,
+    };
+    for mut watcher in watchers {
+      assert_eq!(watcher.next(), left);
+      watcher.close();
+    }
+  })
+  .await?;
   Ok(())
 }

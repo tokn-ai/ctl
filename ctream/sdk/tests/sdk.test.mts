@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, {type TestContext} from "node:test";
 import { fileURLToPath } from "node:url";
-import { Ctream, type CtreamOptions } from "@tokn-ai/ctream-sdk";
+import { Ctream, CtreamTurnError, type CtreamOptions, type CtreamTurn } from "@tokn-ai/ctream-sdk";
 
 const fixture = fileURLToPath(new URL("./fixture.mts", import.meta.url));
 function setup(t: TestContext, mode = "ok", options: CtreamOptions = {}) {
@@ -18,6 +18,100 @@ function setup(t: TestContext, mode = "ok", options: CtreamOptions = {}) {
   const lifecycle = () => existsSync(log + ".lifecycle") ? readFileSync(log + ".lifecycle", "utf8").trim().split("\n") : [];
   return {client, calls, lifecycle, log};
 }
+
+test("control turns scope mutations to one callback, share frame dimensions and leave reads available", async (t) => {
+  const {client, calls} = setup(t, "ok", {turns: true, agent_id: "writer"});
+  const session = await client.resolveWindow(":3", {title: "Document"});
+  let old: CtreamTurn;
+  try {
+    const busy = (e: unknown) => e instanceof CtreamTurnError && e.code === "busy" && e.owner_id === "session-owner";
+    const stale = (e: unknown) => e instanceof CtreamTurnError && e.code === "stale_turn";
+    const result = await session.withTurn(async (turn) => {
+      old = turn;
+      const [, receipt] = await Promise.all([turn.screenshot(), turn.click({x: 0, y: 0})]);
+      assert.match(receipt?.action_id ?? "", /^[0-9a-f-]{36}$/);
+      await session.capabilities();
+      await assert.rejects(session.pressKeys("Tab"), (e: unknown) =>
+        stale(e) && e instanceof CtreamTurnError && /^[0-9a-f-]{36}$/.test(e.action_id ?? ""));
+      await assert.rejects(session.withTurn(() => assert.fail("unexpected nested grant")), busy);
+      return (await turn.elements())[0].name;
+    }, {ttl_ms: 30_000});
+    assert.equal(result, "Save");
+    await session.withTurn(async (turn) => {
+      await assert.rejects(old.typeText("late"), stale);
+      await assert.rejects(old.capabilities(), stale);
+      await turn.move({x: 0, y: 0});
+    });
+    await session.setText("0", "unscoped");
+    const sent = calls().filter(call => call.request);
+    assert.ok(sent.every(({args}) => args[args.indexOf("--protocol") + 1] === "1.0.7"));
+    assert.deepEqual(sent.map(call => call.request), [
+      {operation: "acquire_turn", ttl_ms: 30_000}, {operation: "screenshot"},
+      {operation: "click", point: {x: 0, y: 0}, button: "left", size: [1, 1], turn_id: "turn-1"},
+      {operation: "capabilities"}, {operation: "press_keys", keys: ["Tab"]}, {operation: "acquire_turn"},
+      {operation: "elements"}, {operation: "release_turn", turn_id: "turn-1"}, {operation: "acquire_turn"},
+      {operation: "move", point: {x: 0, y: 0}, size: [1, 1], turn_id: "turn-2"},
+      {operation: "release_turn", turn_id: "turn-2"}, {operation: "set_text", path: "0", text: "unscoped"},
+    ]);
+  } finally { await session.close(); }
+});
+
+test("turn expiration and callback exceptions release once, preserve the original error and allow further reads", async (t) => {
+  const {client, calls} = setup(t, "expired_turn", {turns: true});
+  const stale = (e: unknown) => e instanceof CtreamTurnError && e.code === "stale_turn" && e.owner_id === undefined;
+  for (const mode of ["mutation", "release", "callback"]) {
+    const session = client.session(":3");
+    try {
+      const failure = new Error("callback failed");
+      const run = session.withTurn(async turn => {
+        if (mode === "callback") throw failure;
+        if (mode === "mutation") await turn.drag({x: 0, y: 0}, {x: 1, y: 1}, {size: [2, 2]});
+      }, {ttl_ms: 1});
+      await assert.rejects(run, mode === "callback" ? e => e === failure : stale);
+      await session.capabilities();
+    } finally { await session.close(); }
+  }
+  assert.equal(calls().filter(call => call.request.operation === "release_turn").length, 3);
+});
+
+test("a synchronous turn callback revokes its handle before a later microtask runs", async (t) => {
+  const {client, calls} = setup(t, "ok", {turns: true});
+  const session = client.session(":3");
+  try {
+    let late: Promise<void> | undefined;
+    await session.withTurn(turn => {
+      queueMicrotask(() => {
+        late = assert.rejects(turn.pressKeys("Return"), e => e instanceof CtreamTurnError && e.code === "stale_turn");
+      });
+    });
+    assert.ok(late);
+    await late;
+    assert.deepEqual(calls().map(call => call.request.operation), ["acquire_turn", "release_turn"]);
+  } finally { await session.close(); }
+});
+
+test("control turns require explicit opt-in and validate TTL before contacting a host", async (t) => {
+  const classic = setup(t);
+  await assert.rejects(classic.client.session(":3").withTurn(() => {}), /turns: true/);
+  assert.deepEqual(classic.lifecycle(), []);
+  const {client, lifecycle} = setup(t, "ok", {turns: true});
+  const session = client.session(":3");
+  for (const ttl_ms of [0, -1, 1.5, 30_001, NaN, Infinity]) {
+    await assert.rejects(session.withTurn(() => {}, {ttl_ms}), RangeError);
+  }
+  assert.deepEqual(lifecycle(), []);
+  await session.close();
+});
+
+test("closing during acquisition never starts a callback with a disconnected grant", async (t) => {
+  const {client, lifecycle} = setup(t, "ok", {turns: true});
+  const session = client.session(":3");
+  const run = session.withTurn(() => assert.fail("unexpected callback after close"));
+  const closed = session.close();
+  await assert.rejects(run, /closed while acquiring/);
+  await closed;
+  assert.equal(lifecycle().length, 2);
+});
 
 test("lists displays and windows and preserves launcher arguments", async (t) => {
   const {client, calls} = setup(t, "ok", {

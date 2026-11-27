@@ -305,7 +305,13 @@ impl WindowInput {
               same_screen: true,
             },
           )?
-          .check()?
+          .check()
+          .map_err(|error| match error {
+            x11rb::errors::ReplyError::ConnectionError(_) => {
+              ctream_driver::UnconfirmedDelivery::error(io::Error::other(error))
+            }
+            x11rb::errors::ReplyError::X11Error(_) => io::Error::other(error),
+          })?
       };
     }
     match event {
@@ -361,6 +367,10 @@ impl WindowInput {
 }
 
 impl InputSource for WindowInput {
+  fn run_piped(self, input: io::PipeReader, mut output: io::PipeWriter) -> Result<()> {
+    self.serve(&mut io::BufReader::new(input), &mut output, true)
+  }
+
   fn run(self) -> Result<()> {
     self.run_channel(false)
   }
@@ -371,11 +381,23 @@ impl InputSource for WindowInput {
 }
 
 impl WindowInput {
-  fn run_channel(mut self, synchronized: bool) -> Result<()> {
-    let mut stdout = io::stdout().lock();
+  fn run_channel(self, synchronized: bool) -> Result<()> {
+    self.serve(
+      &mut io::stdin().lock(),
+      &mut io::stdout().lock(),
+      synchronized,
+    )
+  }
+
+  fn serve(
+    mut self,
+    input: &mut impl BufRead,
+    stdout: &mut impl Write,
+    synchronized: bool,
+  ) -> Result<()> {
     writeln!(stdout, "ready")?;
     stdout.flush()?;
-    let result = self.receive(&mut io::stdin().lock(), &mut stdout, synchronized);
+    let result = self.receive(input, stdout, synchronized);
     if self.buttons.is_empty() && self.keys.is_empty() {
       return result;
     }

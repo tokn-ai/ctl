@@ -1,4 +1,4 @@
-use ctream_driver::{InputSource, Result};
+use ctream_driver::{InputSource, Result, UnconfirmedDelivery};
 use std::{
   io,
   process::{Child, Command},
@@ -8,6 +8,16 @@ use std::{
 pub struct InputProcess(pub Command);
 
 impl InputSource for InputProcess {
+  fn run_piped(mut self, input: io::PipeReader, output: io::PipeWriter) -> Result<()> {
+    self
+      .0
+      .stdin(input)
+      .stdout(output)
+      .arg("--sync")
+      .env("CTREAM_INPUT_WORKER", "1");
+    run_operation(self.0)
+  }
+
   fn run(self) -> Result<()> {
     run_operation(self.0)
   }
@@ -29,9 +39,12 @@ impl Drop for RunningProcess {
 
 fn run_operation(mut command: Command) -> Result<()> {
   let mut child = RunningProcess(command.spawn()?);
-  let status = child.0.wait()?;
+  let status = child.0.wait().map_err(UnconfirmedDelivery::error)?;
   if !status.success() {
-    return Err(io::Error::other(format!("operation backend exited with {status}")).into());
+    let error = io::Error::other(format!("operation backend exited with {status}"));
+    // Only the helper's synchronized reply identifies a refused command. A
+    // nonzero exit can also mean the compositor disappeared during a fence.
+    return Err(UnconfirmedDelivery::error(error).into());
   }
   Ok(())
 }

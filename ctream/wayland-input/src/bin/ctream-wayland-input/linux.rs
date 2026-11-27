@@ -222,7 +222,15 @@ pub(super) fn run() -> Result<(), Box<dyn Error>> {
         output.flush()?;
         continue;
       }
-      devices.event(&line, synchronized)?;
+      if let Err(error) = devices.event(&line, synchronized) {
+        // Validation rejected this command before queuing a Wayland request.
+        if synchronized && std::env::var("CTREAM_INPUT_WORKER").as_deref() == Ok("1") {
+          let mut output = io::stdout().lock();
+          output.write_all(b"refused\n")?;
+          output.flush()?;
+        }
+        return Err(error);
+      }
       conn.flush()?;
       queue.dispatch_pending(&mut Client)?;
     }

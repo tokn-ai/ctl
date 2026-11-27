@@ -91,6 +91,10 @@ impl ForwardWindowInput for Session {
 }
 
 impl InputSource for WindowInput {
+  fn run_piped(self, input: io::PipeReader, mut output: io::PipeWriter) -> Result<()> {
+    self.serve(io::BufReader::new(input), &mut output, true)
+  }
+
   fn run(self) -> Result<()> {
     self.run_channel(false)
   }
@@ -102,6 +106,19 @@ impl InputSource for WindowInput {
 
 impl WindowInput {
   fn run_channel(self, synchronized: bool) -> Result<()> {
+    self.serve(
+      io::BufReader::new(io::stdin()),
+      &mut io::stdout().lock(),
+      synchronized,
+    )
+  }
+
+  fn serve(
+    self,
+    input: impl io::BufRead + Send + 'static,
+    output: &mut impl io::Write,
+    synchronized: bool,
+  ) -> Result<()> {
     let _dpi = Dpi::enter()?;
     self.target.validate()?;
     state::run_monitored(
@@ -109,14 +126,18 @@ impl WindowInput {
       window::Window::new(NativeWindow {
         target: self.target,
       }),
-      io::BufReader::new(io::stdin()),
-      &mut io::stdout().lock(),
+      input,
+      output,
     )?;
     Ok(())
   }
 }
 
 impl InputSource for Input {
+  fn run_piped(self, input: io::PipeReader, mut output: io::PipeWriter) -> Result<()> {
+    self.serve(io::BufReader::new(input), &mut output, true)
+  }
+
   fn run(self) -> Result<()> {
     self.run_channel(false)
   }
@@ -128,6 +149,19 @@ impl InputSource for Input {
 
 impl Input {
   fn run_channel(self, synchronized: bool) -> Result<()> {
+    self.serve(
+      io::BufReader::new(io::stdin()),
+      &mut io::stdout().lock(),
+      synchronized,
+    )
+  }
+
+  fn serve(
+    self,
+    input: impl io::BufRead + Send + 'static,
+    output: &mut impl io::Write,
+    synchronized: bool,
+  ) -> Result<()> {
     // Keep the DPI guard on this execution thread throughout monitor queries.
     let _dpi = Dpi::enter()?;
     let topology = monitors(self.display)?;
@@ -137,8 +171,8 @@ impl Input {
         display: self.display,
         topology,
       },
-      &mut io::stdin().lock(),
-      &mut io::stdout().lock(),
+      &mut { input },
+      output,
     )?;
     Ok(())
   }

@@ -4,9 +4,11 @@ pub mod automation;
 pub mod geometry;
 pub mod input;
 mod latency;
+pub mod live;
 pub mod media;
 pub mod options;
 pub mod sdk;
+pub mod semantic_session;
 pub mod transport;
 
 use crate::{
@@ -24,6 +26,7 @@ use ctream_proto::{
   valid_capture_driver, valid_window_id,
 };
 pub use latency::LatencyProbe;
+pub use live::generate_agent_id;
 use serde::de::DeserializeOwned;
 use std::{
   io::{self, Read, Write},
@@ -193,6 +196,10 @@ impl<T: Transport> Client<T> {
   }
 
   pub fn query<Q: Query>(&self, query: Q) -> io::Result<Q::Reply> {
+    self.query_with_delivery(query, false)
+  }
+
+  fn query_with_delivery<Q: Query>(&self, query: Q, mutation: bool) -> io::Result<Q::Reply> {
     let arguments = query.arguments()?;
     let payload = query.payload()?;
     let Channel {
@@ -200,11 +207,13 @@ impl<T: Transport> Client<T> {
       mut writer,
       cancellation,
     } = self.transport.open(&arguments)?;
+    let mut dispatched = false;
     let result = (|| {
       if let Some(payload) = payload {
         writer.write_all(&payload)?;
       }
       drop(writer);
+      dispatched = mutation;
       let mut data = Vec::new();
       const LIMIT: usize = 1024 * 1024;
       reader.take((LIMIT + 1) as u64).read_to_end(&mut data)?;
@@ -214,7 +223,11 @@ impl<T: Transport> Client<T> {
       serde_json::from_slice(&data).map_err(io::Error::other)
     })();
     cancellation.cancel();
-    result
+    if dispatched {
+      result.map_err(transport::after_dispatch)
+    } else {
+      result
+    }
   }
 
   pub fn discover(&self) -> io::Result<Vec<DisplaySession>> {
@@ -304,9 +317,26 @@ impl<T: Transport> Session<T> {
     if let Some(window) = &self.window {
       validate_window_id(self.target, &window.id)?;
     }
+    let Some(request) = self.video_request(options)? else {
+      return self.capture_with_driver(driver);
+    };
+    let mut arguments = vec![
+      VIDEO_STREAM_VERSION.into(),
+      "capture-stream".into(),
+      self.target.to_string(),
+      driver.into(),
+      serde_json::to_string(&request)?,
+    ];
+    if let Some(window) = &self.window {
+      arguments.push(window.id.clone());
+    }
+    Capture::started_video(self.client.transport.open(&arguments)?, driver, &request)
+  }
+
+  fn video_request(&self, options: VideoOptions) -> io::Result<Option<VideoRequest>> {
     let capabilities = match self.client.video_capabilities() {
       Ok(capabilities) => capabilities,
-      Err(_) => return self.capture_with_driver(driver),
+      Err(_) => return Ok(None),
     };
     if capabilities.codecs.len() > 2
       || capabilities.codecs.contains(&VideoCodec::Auto)
@@ -331,17 +361,77 @@ impl<T: Transport> Session<T> {
     request
       .validate()
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let mut arguments = vec![
-      VIDEO_STREAM_VERSION.into(),
-      "capture-stream".into(),
-      self.target.to_string(),
-      driver.into(),
-      serde_json::to_string(&request)?,
-    ];
-    if let Some(window) = &self.window {
-      arguments.push(window.id.clone());
+    Ok(Some(request))
+  }
+
+  /// Bind a macOS viewer's input to its own capture connection as soon as
+  /// the host supports it. Earlier agents retain the unleased capture flow.
+  pub fn viewer_capture(
+    &self,
+    driver: Option<&str>,
+    options: VideoOptions,
+  ) -> io::Result<media::ViewerCapture<T::Reader, T::Writer>> {
+    if self.target == Target::MacosDesktop {
+      self.validate_target()?;
+      let window = self
+        .window
+        .as_ref()
+        .ok_or_else(|| io::Error::other("missing macOS window"))?;
+      validate_window_id(self.target, &window.id)?;
+      let provider = driver.unwrap_or("auto");
+      if !valid_capture_driver(provider) {
+        return Err(io::Error::other("invalid capture driver identifier"));
+      }
+      let lease = uuid::Uuid::new_v4().simple().to_string();
+      let mut arguments = vec![
+        ctream_proto::DAEMON_VERSION.into(),
+        "viewer-capture".into(),
+        self.target.to_string(),
+        window.id.clone(),
+        lease.clone(),
+        provider.into(),
+      ];
+      let video = if driver.is_some() {
+        options
+          .validate()
+          .map_err(|reason| io::Error::new(io::ErrorKind::InvalidInput, reason))?;
+        self.video_request(options)?
+      } else {
+        None
+      };
+      if let Some(request) = &video {
+        arguments.push(serde_json::to_string(request)?);
+      }
+      let capture = self
+        .client
+        .transport
+        .open(&arguments)
+        .and_then(|channel| match video {
+          Some(request) => Capture::started_video(channel, provider, &request),
+          None => Capture::started(channel, provider),
+        });
+      match capture {
+        Ok(capture) => {
+          return Ok(media::ViewerCapture {
+            capture,
+            lease: Some(lease),
+          });
+        }
+        Err(error)
+          if error
+            .to_string()
+            .contains("usage: ctream-agent VERSION OPERATION") => {}
+        Err(error) => return Err(error),
+      }
     }
-    Capture::started_video(self.client.transport.open(&arguments)?, driver, &request)
+    let capture = match driver {
+      Some(driver) => self.capture_with_options(driver, options)?,
+      None => self.capture()?,
+    };
+    Ok(media::ViewerCapture {
+      capture,
+      lease: None,
+    })
   }
 
   pub fn capture_with_driver(&self, driver: &str) -> io::Result<Capture<T::Reader, T::Writer>> {
@@ -519,11 +609,14 @@ impl<T: Transport> Session<T> {
   }
 
   pub fn action(&self, action: Action) -> io::Result<ActionResult> {
-    self.client.query(ApplyAction {
-      target: self.target,
-      window: self.semantic_window()?,
-      action,
-    })
+    self.client.query_with_delivery(
+      ApplyAction {
+        target: self.target,
+        window: self.semantic_window()?,
+        action,
+      },
+      true,
+    )
   }
 }
 
@@ -687,6 +780,30 @@ mod tests {
       title: "Example".into(),
       app_id: "example".into(),
     }
+  }
+
+  #[test]
+  fn viewer_presents_its_individual_capture_lease_on_each_input_channel() {
+    let frame =
+      "{\"driver\":\"macos.screencapturekit\",\"format\":{\"type\":\"ppm\"}}\nP6\n1 1\n255\nabc";
+    let (client, observed) = client(&[frame, frame, "ready\n", "ready\n"]);
+    let view = client.session(
+      Target::MacosDesktop,
+      Some(Window {
+        id: "macos-1-2".into(),
+        ..window()
+      }),
+    );
+    let first = view.viewer_capture(None, VideoOptions::default()).unwrap();
+    let second = view.viewer_capture(None, VideoOptions::default()).unwrap();
+    assert_ne!(first.lease, second.lease);
+    for lease in [first.lease.as_deref(), second.lease.as_deref()] {
+      assert!(lease.is_some_and(ctream_proto::valid_capture_lease));
+      view.viewer_input_with_lease("viewer", lease).unwrap();
+    }
+    let requests = observed.requests.lock().unwrap();
+    assert_eq!(requests[0][4], requests[2][5]);
+    assert_eq!(requests[1][4], requests[3][5]);
   }
 
   #[test]

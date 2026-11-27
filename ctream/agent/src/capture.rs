@@ -3,6 +3,10 @@
 //! Custom agents can supply their own catalog and host their typed sources with
 //! `runtime::capture_with_metadata` or `runtime::capture_video_with_metadata`.
 
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) mod platform;
+pub mod pool;
+
 use crate::runtime::{capture_video_with_metadata, capture_with_metadata};
 use ctream_driver::{CaptureDisplay, CaptureOptions, CaptureSource, CaptureWindow, Result};
 use ctream_proto::{

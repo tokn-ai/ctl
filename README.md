@@ -292,8 +292,28 @@ capture setup. Use the WSL endpoint for a Windows desktop. See
 TypeScript agents can keep a display or window session open, read PNG screenshots
 from its capture stream, locate text, and send input locally or over SSH.
 Each client gets an ID such as `otter#7c2a`. Set `agent_id` to supply your own.
-Run `ctream-agent activity` on the display host to see who issued each action. See the
+Viewers on the same display or window see a participant roster, labeled cursors
+and input gestures. The display host broadcasts these events to remote and
+read-only viewers. Use `client.watch(target, window_id)` to draw the same overlay
+in a custom viewer. Run `ctream-agent activity` on the host for action history. See the
 [ctream TypeScript SDK and AUV migration guide](ctream/sdk/README.md).
+
+On the display host, `ctream-agent daemon` starts on demand and serves local
+and SSH clients through a private socket or named pipe. It admits input,
+dispatches it to the platform driver, and records the outcome. Compatible
+capture subscriptions share a native producer. A slow viewer can skip frames
+while other viewers and input continue. The daemon exits after 30 seconds
+without client connections.
+
+When several agents share a desktop, a short control turn can protect a
+multi-step interaction such as opening a menu and choosing an item. Use
+**Take turn** and **Release turn** in the viewer, or enable `turns: true`
+on the TypeScript client and call `session.withTurn()`.
+Other controllers can still watch and take screenshots. A competing input
+request returns `busy` with the current participant ID. A native viewer keeps the same participant
+identity when it switches from watching to controlling a source. On the host,
+`ctream-agent activity --details` shows who requested input, the refusal
+reason and owner for a conflict, or the driver outcome for an admitted action.
 
 For the tmux-style terminal UI (local sessions, including when run inside SSH):
 

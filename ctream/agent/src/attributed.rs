@@ -1,75 +1,58 @@
-//! Run the high-level action on the display host, inside its journal boundary.
-use ctream_agent::activity::Journal;
-use ctream_client::{Client, sdk, transport::Local};
+//! Host-side SDK adapter. The daemon owns all input and its audit lifecycle.
+use ctream_agent::{
+  daemon::Authority,
+  desktop_input::{DesktopTransport, InputRequest},
+};
+use ctream_client::{
+  Client,
+  sdk::{self, Mutation, SessionAuthority, SessionProtocol},
+};
 use ctream_proto::Target;
 use std::io;
 
-pub(super) fn run(
+pub(super) fn serve(
   target: Target,
   agent_id: &str,
   window: Option<&str>,
+  protocol: SessionProtocol,
 ) -> ctream_driver::Result<()> {
-  let mut journal = Journal::open()?;
-  let local = Local {
-    agent: std::env::current_exe()?,
-  };
-  #[cfg(target_os = "macos")]
-  let local = LeasedDesktop {
-    local,
-    lease: uuid::Uuid::new_v4().simple().to_string(),
-  };
-  sdk::run_attributed_session(
-    &Client::new(local),
+  let session_id = uuid::Uuid::new_v4().to_string();
+  let authority = Authority::connect(target, window, agent_id, &session_id)?;
+  serve_with(authority, target, window, protocol, io::stdin().lock())
+}
+
+pub(super) fn serve_with(
+  authority: Authority,
+  target: Target,
+  window: Option<&str>,
+  protocol: SessionProtocol,
+  input: impl io::Read,
+) -> ctream_driver::Result<()> {
+  let client = Client::new(DesktopTransport::new(None)?);
+  let mut controller = Controller(authority);
+  let session = sdk::run_host_session(
+    &client,
     target,
     window.map(str::to_owned),
-    io::stdin().lock(),
+    input,
     io::stdout().lock(),
-    |operation, apply| journal.record(agent_id, target, window, operation, apply),
-  )?;
+    protocol,
+    &mut controller,
+  );
+  session.and(controller.0.close())?;
   Ok(())
 }
 
-// On macOS the GUI broker binds native input authorization to the lifetime
-// of this session's own capture, including when another agent selects the same window.
-#[cfg(target_os = "macos")]
-struct LeasedDesktop {
-  local: Local,
-  lease: String,
-}
+struct Controller(Authority);
 
-#[cfg(target_os = "macos")]
-impl ctream_client::transport::Transport for LeasedDesktop {
-  type Reader = <Local as ctream_client::transport::Transport>::Reader;
-  type Writer = <Local as ctream_client::transport::Transport>::Writer;
-
-  fn open(
-    &self,
-    args: &[String],
-  ) -> io::Result<ctream_client::transport::Channel<Self::Reader, Self::Writer>> {
-    if let [version, operation, target, window] = args
-      && target == "macos"
-    {
-      let owned = match (version.as_str(), operation.as_str()) {
-        (ctream_proto::MACOS_WINDOW_VERSION, "capture-window") => Some("session-capture"),
-        (ctream_proto::INPUT_SYNC_VERSION, "input-sync") => Some("session-input"),
-        // An older desktop broker cannot prove whose capture authorizes input.
-        (_, "input-window") => {
-          return Err(io::Error::other(
-            "named input requires an updated ctream-agent serve",
-          ));
-        }
-        _ => None,
-      };
-      if let Some(operation) = owned {
-        return self.local.open(&[
-          ctream_proto::ATTRIBUTED_SESSION_VERSION.into(),
-          operation.into(),
-          target.clone(),
-          window.clone(),
-          self.lease.clone(),
-        ]);
-      }
-    }
-    self.local.open(args)
+impl SessionAuthority for Controller {
+  fn acquire(&mut self, ttl_ms: u64) -> io::Result<String> {
+    self.0.acquire(ttl_ms)
+  }
+  fn release(&mut self, token: &str) -> io::Result<()> {
+    self.0.release(token)
+  }
+  fn dispatch(&mut self, token: Option<&str>, action: Mutation) -> io::Result<String> {
+    self.0.execute(token, InputRequest::Sdk { action })
   }
 }

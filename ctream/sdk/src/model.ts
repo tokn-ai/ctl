@@ -49,8 +49,12 @@ export interface Element {
   bounds?: {x: number; y: number; width: number; height: number};
 }
 
-function record(value: unknown): value is Record<string, unknown> {
+export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function validAgentId(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,63}|[a-z]{1,59}#[0-9a-f]{4})$/.test(value);
 }
 
 export function expectShape(condition: unknown, expected: string): asserts condition {

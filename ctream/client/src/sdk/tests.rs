@@ -245,7 +245,7 @@ fn observation_and_discovery_do_not_call_the_recorder() {
     execute(
       &mut Execution::Once(&session),
       serde_json::from_value(json!({"operation":operation})).unwrap(),
-      &mut |name, _| panic!("unexpected recorder call for {name}"),
+      &mut |name, _| panic!("unexpected recorder call for {name:?}"),
     )
     .unwrap();
   }
@@ -260,7 +260,7 @@ fn recorder_cannot_skip_replay_or_hide_a_failed_dispatch() {
       assert!(apply().is_err());
       Ok(())
     },
-    "click",
+    LiveAction::Click { point: [0.5, 0.5] },
     || {
       count += 1;
       Ok(())
@@ -269,9 +269,11 @@ fn recorder_cannot_skip_replay_or_hide_a_failed_dispatch() {
   .unwrap();
   assert_eq!(count, 1);
   assert!(
-    mutation(&mut |_, _| Ok(()), "click", || panic!(
-      "skipped operation ran"
-    ))
+    mutation(
+      &mut |_, _| Ok(()),
+      LiveAction::Click { point: [0.5, 0.5] },
+      || panic!("skipped operation ran")
+    )
     .is_err()
   );
   assert!(
@@ -280,9 +282,83 @@ fn recorder_cannot_skip_replay_or_hide_a_failed_dispatch() {
         let _ = apply();
         Ok(())
       },
-      "click",
+      LiveAction::Click { point: [0.5, 0.5] },
       || Err(io::ErrorKind::PermissionDenied.into())
     )
     .is_err()
   );
+}
+
+#[test]
+fn host_session_dispatches_typed_requests_and_negotiates_action_receipts() {
+  use ctream_proto::live::{ActionFailure, TurnError};
+
+  struct Desktop;
+  impl SessionAuthority for Desktop {
+    fn acquire(&mut self, _: u64) -> io::Result<String> {
+      unreachable!()
+    }
+    fn release(&mut self, _: &str) -> io::Result<()> {
+      unreachable!()
+    }
+    fn dispatch(&mut self, _: Option<&str>, action: Mutation) -> io::Result<String> {
+      match action {
+        Mutation::PressKeys { keys } if keys == ["a"] => Ok("applied".to_owned()),
+        Mutation::TypeText { text } if text == "private" => Err(io::Error::other(ActionFailure {
+          action_id: "refused".to_owned(),
+          source: io::Error::new(
+            io::ErrorKind::WouldBlock,
+            TurnError {
+              code: "busy".to_owned(),
+              owner_id: Some("alice".to_owned()),
+            },
+          ),
+        })),
+        _ => panic!("unexpected request"),
+      }
+    }
+  }
+
+  let input = b"{\"operation\":\"press_keys\",\"keys\":[\"a\"]}\n{\"operation\":\"type_text\",\"text\":\"private\"}\n";
+  for protocol in [
+    SessionProtocol::Attributed,
+    SessionProtocol::Turns,
+    SessionProtocol::Daemon,
+  ] {
+    let mut output = Vec::new();
+    run_host_session(
+      &Client::new(Agent::default()),
+      Target::X11(1),
+      None,
+      input.as_slice(),
+      &mut output,
+      protocol,
+      &mut Desktop,
+    )
+    .unwrap();
+    let replies: Vec<Value> = serde_json::Deserializer::from_slice(&output)
+      .into_iter()
+      .collect::<Result<_, _>>()
+      .unwrap();
+    assert_eq!(replies[0]["ok"], true);
+    assert!(replies[0]["result"].is_null());
+    assert_eq!(replies[1]["ok"], false);
+    assert!(replies[1]["error"].is_string());
+    let admission = protocol != SessionProtocol::Attributed;
+    assert_eq!(replies[1]["code"].as_str(), admission.then_some("busy"));
+    assert_eq!(
+      replies[1]["owner_id"].as_str(),
+      admission.then_some("alice")
+    );
+    let receipts = protocol == SessionProtocol::Daemon;
+    assert_eq!(
+      replies[0].get("action_id").and_then(Value::as_str),
+      receipts.then_some("applied")
+    );
+    assert_eq!(
+      replies[1].get("action_id").and_then(Value::as_str),
+      receipts.then_some("refused")
+    );
+    assert!(!String::from_utf8(output).unwrap().contains("private"));
+  }
 }

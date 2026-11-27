@@ -14,15 +14,20 @@ use std::{
 
 pub(super) struct CaptureSession {
   identity: WindowIdentity,
+  source: ctream_agent::capture::pool::SourceStatus,
   has_frame: AtomicBool,
   ended: AtomicBool,
   input: Mutex<Option<UnixStream>>,
 }
 
 impl CaptureSession {
-  pub(super) fn new(identity: WindowIdentity) -> Self {
+  pub(super) fn new(
+    identity: WindowIdentity,
+    source: ctream_agent::capture::pool::SourceStatus,
+  ) -> Self {
     Self {
       identity,
+      source,
       has_frame: AtomicBool::new(false),
       ended: AtomicBool::new(false),
       input: Mutex::new(None),
@@ -46,7 +51,7 @@ impl CaptureSession {
       return Err("macOS window input must match the active window capture".into());
     }
     let mut input = self.input.lock().unwrap();
-    if self.ended.load(Ordering::Acquire) {
+    if self.source.ended() || self.ended.load(Ordering::Acquire) {
       return Err("the active macOS window capture has ended".into());
     }
     if input.is_some() {
@@ -58,7 +63,13 @@ impl CaptureSession {
   }
 }
 
-pub(super) struct CaptureRegistry(Mutex<BTreeMap<Option<String>, Arc<CaptureSession>>>);
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+enum CaptureKey {
+  Named(String),
+  Unnamed(uuid::Uuid),
+}
+
+pub(super) struct CaptureRegistry(Mutex<BTreeMap<CaptureKey, Arc<CaptureSession>>>);
 
 impl CaptureRegistry {
   pub(super) const fn new() -> Self {
@@ -70,9 +81,10 @@ impl CaptureRegistry {
     lease: Option<&str>,
     session: Arc<CaptureSession>,
   ) -> Result<CaptureLease<'_>> {
-    // Retained captures use the single None slot. Named captures are indexed
-    // by the opaque session lease, independently of the selected window ID.
-    let key = lease.map(str::to_owned);
+    let key = match lease {
+      Some(lease) => CaptureKey::Named(lease.into()),
+      None => CaptureKey::Unnamed(uuid::Uuid::new_v4()),
+    };
     match self.0.lock().unwrap().entry(key.clone()) {
       Entry::Occupied(_) => Err("a macOS window capture is already open for this session".into()),
       Entry::Vacant(entry) => {
@@ -92,13 +104,25 @@ impl CaptureRegistry {
     identity: WindowIdentity,
     stream: &UnixStream,
   ) -> Result<InputLease> {
-    let session = self
-      .0
-      .lock()
-      .unwrap()
-      .get(&lease.map(str::to_owned))
-      .cloned()
-      .ok_or("macOS window input requires an active capture for this session")?;
+    let sessions = self.0.lock().unwrap();
+    let session = match lease {
+      Some(lease) => sessions.get(&CaptureKey::Named(lease.into())),
+      None => {
+        let mut matches = sessions.iter().filter(|(key, session)| {
+          matches!(key, CaptureKey::Unnamed(_)) && session.identity == identity
+        });
+        let first = matches.next();
+        if matches.next().is_some() {
+          return Err(
+            "several viewers are capturing this window; input requires a capture lease".into(),
+          );
+        }
+        first.map(|(_, session)| session)
+      }
+    }
+    .cloned()
+    .ok_or("macOS window input requires an active capture for this session")?;
+    drop(sessions);
     if lease.is_some() && !session.has_frame.load(Ordering::Acquire) {
       return Err("macOS session input requires a frame from the selected window".into());
     }
@@ -108,7 +132,7 @@ impl CaptureRegistry {
 
 pub(super) struct CaptureLease<'a> {
   registry: &'a CaptureRegistry,
-  key: Option<String>,
+  key: CaptureKey,
   session: Arc<CaptureSession>,
 }
 
@@ -123,7 +147,7 @@ pub(super) struct InputLease(Arc<CaptureSession>);
 
 impl InputLease {
   pub(super) fn ended(&self) -> bool {
-    self.0.ended.load(Ordering::Acquire)
+    self.0.source.ended() || self.0.ended.load(Ordering::Acquire)
   }
 }
 
@@ -141,7 +165,7 @@ mod tests {
   #[test]
   fn capture_end_releases_input_for_the_selected_window() {
     let identity = WindowIdentity { id: 7, pid: 10 };
-    let session = Arc::new(CaptureSession::new(identity));
+    let session = Arc::new(CaptureSession::new(identity, Default::default()));
     let (peer, mut input) = UnixStream::pair().unwrap();
     assert!(
       Arc::clone(&session)
@@ -162,6 +186,58 @@ mod tests {
   }
 
   #[test]
+  fn ambiguous_legacy_input_never_borrows_a_named_or_unrelated_capture() {
+    let registry = CaptureRegistry::new();
+    let id = WindowIdentity { id: 1, pid: 22 };
+    let named = registry
+      .start(
+        Some("private"),
+        Arc::new(CaptureSession::new(id, Default::default())),
+      )
+      .unwrap();
+    named.session.received_frame();
+    let (_peer, socket) = UnixStream::pair().unwrap();
+    assert!(registry.attach(None, id, &socket).is_err());
+    let first = registry
+      .start(None, Arc::new(CaptureSession::new(id, Default::default())))
+      .unwrap();
+    let second = registry
+      .start(None, Arc::new(CaptureSession::new(id, Default::default())))
+      .unwrap();
+    assert!(registry.attach(None, id, &socket).is_err());
+    let bound = registry.attach(Some("private"), id, &socket).unwrap();
+    drop(second);
+    let retained = registry.attach(None, id, &socket).unwrap();
+    drop(first);
+    assert!(retained.ended());
+    assert!(!bound.ended());
+  }
+
+  #[test]
+  fn a_closed_native_source_revokes_input_even_when_a_viewer_is_still_writing() {
+    let pool = ctream_agent::capture::pool::Pool::default();
+    let (send, publisher) = std::sync::mpsc::channel();
+    let subscription = pool
+      .subscribe(1, move |frames, life| {
+        send.send(frames).unwrap();
+        while !life.cancelled(Duration::from_millis(20)) {}
+        Ok(())
+      })
+      .unwrap();
+    let identity = WindowIdentity { id: 4, pid: 7 };
+    let session = Arc::new(CaptureSession::new(identity, subscription.status()));
+    let (_peer, socket) = UnixStream::pair().unwrap();
+    let input = session.clone().attach(identity, &socket).unwrap();
+    publisher
+      .recv_timeout(Duration::from_secs(2))
+      .unwrap()
+      .end();
+    assert!(input.ended());
+    drop(input);
+    assert!(session.attach(identity, &socket).is_err());
+  }
+
+  #[test]
   fn named_captures_and_input_remain_independent_for_shared_and_distinct_windows() {
     const FIRST: Option<&str> = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     const SECOND: Option<&str> = Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -170,14 +246,23 @@ mod tests {
     for second_id in [first_id, different] {
       let registry = CaptureRegistry::new();
       let first = registry
-        .start(FIRST, Arc::new(CaptureSession::new(first_id)))
+        .start(
+          FIRST,
+          Arc::new(CaptureSession::new(first_id, Default::default())),
+        )
         .unwrap();
       let second = registry
-        .start(SECOND, Arc::new(CaptureSession::new(second_id)))
+        .start(
+          SECOND,
+          Arc::new(CaptureSession::new(second_id, Default::default())),
+        )
         .unwrap();
       assert!(
         registry
-          .start(FIRST, Arc::new(CaptureSession::new(second_id)))
+          .start(
+            FIRST,
+            Arc::new(CaptureSession::new(second_id, Default::default()))
+          )
           .is_err()
       );
       let (_first_peer, mut first_socket) = UnixStream::pair().unwrap();

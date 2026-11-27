@@ -149,8 +149,32 @@ fn run_child<W: Write + Send>(
   })
 }
 
+// An event-driven capture helper may never write again if its window is idle.
+// Release its native resources even if the capture daemon is killed abruptly.
+#[cfg(target_os = "linux")]
+fn stop_with_worker(command: &mut Command) {
+  use rustix::process::{self, Signal};
+  use std::os::unix::process::CommandExt;
+  let parent = process::getpid();
+  // SAFETY: this pre-exec hook only issues prctl/getppid and constructs an
+  // errno on failure. No locks, allocations or other post-fork runtime work.
+  unsafe {
+    command.pre_exec(move || {
+      process::set_parent_process_death_signal(Some(Signal::KILL))?;
+      if process::getppid() != Some(parent) {
+        return Err(io::Error::from_raw_os_error(
+          rustix::io::Errno::PIPE.raw_os_error(),
+        ));
+      }
+      Ok(())
+    });
+  }
+}
+
 impl CaptureSource for ProcessCapture {
   fn run<W: Write + Send>(mut self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    stop_with_worker(&mut self.command);
     let mut next_capture = Instant::now();
     loop {
       if !run_child(&mut self.command, output, lifetime, self.delivery)? {
@@ -183,6 +207,37 @@ mod tests {
     frame_bytes: NonZeroUsize::new(5).unwrap(),
     interval: Duration::from_millis(125),
   };
+
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn an_idle_native_helper_exits_when_its_owning_worker_dies() {
+    let mut child = RunningProcess(
+      thread::spawn(|| {
+        let mut shell = Command::new("sleep");
+        shell.arg("30");
+        stop_with_worker(&mut shell);
+        shell.spawn().unwrap()
+      })
+      .join()
+      .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+      if let Some(status) = child.0.try_wait().unwrap() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+          status.signal(),
+          Some(rustix::process::Signal::KILL.as_raw())
+        );
+        break;
+      }
+      assert!(
+        Instant::now() < deadline,
+        "capture helper outlived its worker"
+      );
+      thread::sleep(Duration::from_millis(2));
+    }
+  }
 
   #[test]
   fn cancellation_stops_a_capture_process() {

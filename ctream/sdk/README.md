@@ -4,7 +4,8 @@
 display or window on the local machine or over SSH. A screenshot contains the
 PNG and its dimensions. A pointer action uses pixel coordinates from that
 screenshot. The SDK also exposes keyboard shortcuts, OCR, and Wayland
-accessibility controls.
+accessibility controls. A live watch reports who is connected to that source
+and which actions they take.
 
 ## Install from this checkout
 
@@ -21,7 +22,7 @@ In the downstream project, install the resulting tarball. Adjust the relative
 path to your checkout.
 
 ```sh
-pnpm add ../ctl/ctream/sdk/tokn-ai-ctream-sdk-0.1.1.tgz
+pnpm add ../ctl/ctream/sdk/tokn-ai-ctream-sdk-0.1.4.tgz
 ```
 
 Install `ctream-agent` on the display host with
@@ -74,7 +75,7 @@ German model. A vision agent can consume `frame.data` directly and call
 - `new Ctream()` uses the local host. `new Ctream({ host })` uses SSH. The
   constructor accepts `executable` for the local CLI, `agent` for the display
   host’s executable, and `ssh_program` and `ssh_args` for an SSH-compatible
-  launcher. Each method returns a promise. An optional `timeout_ms` bounds a
+  launcher. An optional `timeout_ms` bounds a
   discovery command or dispatched session request.
 - `displays()` includes each display’s metadata and its selectable target,
   such as `:0`, `wayland-0`, `windows-1`, or `macos`. An inaccessible
@@ -104,7 +105,7 @@ fails, open a new session and observe the application before deciding what to do
 The default SDK configuration requires a local CLI with `ctream_sdk` 1.0.4
 and a display host with `ctream_agent` 1.1.16. On Wayland, update
 `ctream-wayland-input` alongside the agent. On macOS, also update the
-running `ctream-agent serve` broker.
+running `ctream-agent serve` GUI worker.
 
 ### Agents on different machines
 
@@ -138,6 +139,16 @@ reported error. An interrupted operation can leave an unknown entry, and a
 failed batch can have partial effects. History retains the newest 10,000
 mutations. Typed text, keys, coordinates, and screenshots stay out of history.
 
+The display host starts `ctream-agent daemon` when the first client needs it.
+The daemon admits and dispatches each input request and owns its audit record.
+With `turns: true`, a successful mutation returns an `ActionReceipt` whose
+`action_id` also appears on its overlay event when one is emitted. A journaled
+turn conflict throws `CtreamTurnError` with an `action_id`; a reported driver failure
+throws `CtreamActionError` with that ID. Older session protocols return
+`undefined` on success. Use `ctream-agent activity --details` on the host to
+look up the ID. A refused input row has status `failed`, a `refusal_code`, and
+the `owner_id` when another participant holds the desktop.
+
 Agents connecting to the same display-host account can keep independent
 sessions open on the same window. The host serializes whole pointer, keyboard,
 and accessibility actions across SDK sessions. Observations run independently,
@@ -152,6 +163,111 @@ a letter or digit. These labels also work with local CLI contract 1.0.3 and
 host contract 1.1.15. An explicit ID in the generated format uses the newer
 contracts and has the same 64-character limit. A host that cannot attribute
 the session rejects it before dispatch.
+
+### Taking a control turn
+
+Construct a client with `turns: true` to reserve desktop input across a
+sequence of actions. The reservation covers the display-host account's
+desktop, including sessions on its other displays and windows. Reads such
+as screenshots and accessibility queries remain available to other agents.
+
+```ts
+import { Ctream, CtreamTurnError } from "@tokn-ai/ctream-sdk";
+
+const client = new Ctream({ host: "display-host", turns: true });
+await using editor = await client.resolveWindow(":0", { title: "Editor" });
+try {
+  const frame = await editor.withTurn(async turn => {
+    await turn.pressKeys("ctrl+a");
+    await turn.typeText("Draft");
+    return turn.screenshot();
+  }, { ttl_ms: 5_000 });
+  console.log(frame.width, frame.height);
+} catch (error) {
+  if (!(error instanceof CtreamTurnError)) throw error;
+  if (error.code === "busy") console.log("Input is held by", error.owner_id);
+  if (error.code === "stale_turn") console.log("The turn ended before completion");
+}
+```
+
+`withTurn` acquires before running the callback, returns its result, and
+releases the turn when it settles or throws. Use the callback's `turn`
+handle for every mutation in that sequence. Its methods mirror the session's
+read and input methods and share the most recent screenshot dimensions.
+Calls made directly on `editor` are independent. A retained callback handle
+rejects further use with `stale_turn` after the callback completes.
+Await `withTurn()` before closing the session to let the callback finish.
+
+The default reservation lasts 10,000 ms. Supply an integer `ttl_ms` from
+1 through 30,000. The host ends the reservation on release, expiry, or
+disconnect. Actions already dispatched can have taken effect. A competing
+acquisition returns `busy` immediately. When the host supplies `owner_id`,
+it is the holder's participant ID. On `stale_turn`, observe the current
+screen before deciding which actions still apply.
+
+Turn-enabled sessions and watches require local `ctream_sdk` 1.0.7 (build 7)
+and host `ctream_agent` 1.1.19 (build 19). The client surfaces a failed
+negotiation before the callback runs.
+
+### Watching participants and actions
+
+`client.watch(target, window_id?)` follows one exact display or window on the
+display host. The first read joins as an observer with the client's `agent_id`.
+Each independent SDK watch and control session has its own host-issued participant ID,
+even when they share an agent label. Key the roster by `participant_id`.
+
+```ts
+import { Ctream } from "@tokn-ai/ctream-sdk";
+
+const client = new Ctream({ host: "display-host" });
+const roster = new Map<string, string>();
+for await (const event of client.watch(":0", "x11-7")) {
+  switch (event.type) {
+    case "snapshot":
+      for (const p of event.participants) roster.set(p.participant_id, p.agent_id);
+      console.log("Watching as", event.self_id);
+      break;
+    case "joined":
+      roster.set(event.participant.participant_id, event.participant.agent_id);
+      break;
+    case "left":
+      roster.delete(event.participant_id);
+      break;
+    case "action":
+      console.log(roster.get(event.participant_id), event.action);
+      break;
+  }
+}
+```
+
+The initial snapshot includes the observer. Subsequent events report joins,
+leaves, and live actions. Pointer events contain normalized `[x, y]`
+coordinates in `[0, 1]`, measured from the top left of the selected source.
+A drag carries `from` and `to`. Keyboard, text, and accessibility actions
+carry only the operation name. Use `client.session()` to dispatch input.
+
+Leaving the loop with `break` closes the watch and waits for the CLI to exit.
+You can also call `await watch.close()` from another task to interrupt a
+pending read, or use `await using watch = client.watch(target)`. A watch
+supports one pending read at a time and may stay quiet indefinitely. A
+disconnect can end iteration or raise an error. Open a new watch to get a
+fresh roster. Events during the gap are unavailable. A stalled consumer can
+be disconnected by the host. On Bun, the SDK also disconnects when pending
+output exceeds 1 MiB.
+
+Watching requires a local CLI supporting `ctream_sdk` 1.0.5 (build 5)
+and a display host supporting `ctream_agent` 1.1.17 (build 17).
+
+With `turns: true`, the snapshot is immediately followed by a `turn` event.
+Its `holder` is a participant and `expires_at_ms` is the host's Unix epoch
+time in milliseconds. Both are null when no explicit turn is reserved. A gesture
+already admitted by the host can still be finishing. Later `turn` events
+track changes across the desktop, so the holder can be outside the selected
+source's roster. An `action` event can include the host's `action_id` UUID
+for lookup in `ctream-agent activity --details --limit 20`. The detailed
+rows include the host account's `account_id` and a public `turn_ref` that
+groups the actions admitted under one turn. The private `turn_id` stays
+with the issuing connection.
 
 ### Actions and observation
 
@@ -213,6 +329,18 @@ transports have no direct ctream SDK equivalent.
 [AUV TypeScript Runner API](https://github.com/moeru-ai/auv/blob/main/js/packages/sdk/README.md#call-runner-capabilities)
 
 ## CLI operation reference
+
+`ctream watch TARGET [--window ID] [--agent-id ID] --protocol 1.0.5`
+streams the live events above as UTF-8 JSON, one record of up to 64 KiB
+excluding the newline. Keep stdin open while observing. Close it to leave.
+
+Use `--protocol 1.0.7` (build 7) to receive desktop turns and daemon-confirmed input events. Build 6 retains turn events and accepts client-reported overlay hints.
+The same version on `session` adds `{"operation":"acquire_turn","ttl_ms":5000}`.
+A grant returns a result containing an opaque `turn_id`. Send it as a
+top-level field on every mutation within that turn and finish with
+`{"operation":"release_turn","turn_id":"…"}`. A successful release returns
+null. Busy and stale requests use the error envelope with a machine-readable
+`code` of `busy` or `stale_turn` and an optional `owner_id`.
 
 Other languages can open `ctream session TARGET [--window ID] [--agent-id ID]`.
 The default contract, `ctream_sdk` 1.0.4 (build 4), generates an ID when the

@@ -1,7 +1,9 @@
-use super::{chrome, drivers, input, setup, view, view::WindowState};
+use super::{chrome, drivers, input, live, requests::Requests, setup, view, view::WindowState};
 use ctream_client::media::Frame;
+use ctream_client::transport::Local;
 use ctream_driver_capture::macos::screen_capture_kit::{Capture, Event, Window, list_windows};
-use ctream_driver_input::macos::{WindowIdentity, WindowInput};
+use ctream_driver_input::macos::WindowIdentity;
+use ctream_proto::{Target, Window as RemoteWindow, WindowId};
 use dispatch2::MainThreadBound;
 use eframe::egui;
 use objc2::MainThreadMarker;
@@ -27,22 +29,44 @@ enum End {
   Failed(String),
 }
 
-impl input::Sink for WindowInput {
-  fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()> {
-    Self::move_pointer(self, x, y, size)
-  }
+type LocalControl = ctream_client::input::Input<io::PipeReader, io::PipeWriter>;
 
-  fn button(&mut self, code: u8, pressed: bool) -> io::Result<()> {
-    Self::button(self, code, pressed)
-  }
+fn open_control(identity: WindowIdentity, activity: live::Publisher) -> io::Result<LocalControl> {
+  use ctream_agent::native_input::picker;
+  use ctream_client::{
+    input::InputFormat,
+    transport::{Cancellation, Channel},
+  };
+  let (input, writer) = io::pipe()?;
+  let (reader, mut output) = io::pipe()?;
+  let attachment = activity.attachment()?;
+  std::thread::Builder::new()
+    .name("ctream-picker-control".into())
+    .spawn(move || {
+      let _ = picker::serve(
+        &Local::default().agent,
+        identity,
+        live::viewer_id(),
+        attachment.as_ref(),
+        io::BufReader::new(input),
+        &mut output,
+      );
+    })?;
+  LocalControl::open_viewer(
+    Channel {
+      reader,
+      writer,
+      cancellation: Cancellation::default(),
+    },
+    InputFormat::Macos,
+  )
+}
 
-  fn key(&mut self, name: &str, pressed: bool) -> io::Result<()> {
-    Self::key(self, name, pressed)
-  }
-
-  fn reset(&mut self) -> io::Result<()> {
-    Self::reset(self)
-  }
+struct LiveWindow {
+  identity: WindowIdentity,
+  activity: live::Live,
+  // Retain the cancellation scope while opening the local agent.
+  _requests: Requests,
 }
 
 #[derive(Default)]
@@ -52,10 +76,12 @@ pub(super) struct Viewer {
   window_error: Option<io::Error>,
   selected_window: Option<u32>,
   capture: Option<MainThreadBound<Capture>>,
+  live: Option<LiveWindow>,
   update: Arc<Mutex<Update>>,
   repaint: view::Repaint,
   texture: Option<egui::TextureHandle>,
-  input: Option<input::Input<WindowInput>>,
+  input: Option<input::Input<LocalControl>>,
+  opening_input: Option<Receiver<io::Result<LocalControl>>>,
   input_error: Option<String>,
   status: Option<(String, bool)>,
   viewing: bool,
@@ -90,6 +116,8 @@ impl Viewer {
 
   fn clear_capture(&mut self) {
     self.input = None;
+    self.opening_input = None;
+    self.live = None;
     self.input_error = None;
     self.selected_window = None;
     self.capture = None;
@@ -175,16 +203,74 @@ impl Viewer {
         End::Failed(error) => Some((error, true)),
       };
     } else if let Some(frame) = frame {
+      // The system picker can reveal the identity only after capture starts.
+      // Resolve its process-bound ID on the main thread, including read-only capture.
+      let window = self
+        .capture
+        .as_ref()
+        .and_then(|capture| {
+          let main =
+            MainThreadMarker::new().expect("ScreenCaptureKit viewer runs on the main thread");
+          capture.get(main).window_identity()
+        })
+        .map(|(id, pid)| WindowIdentity { id, pid });
+      if self.live.as_ref().map(|live| live.identity) != window {
+        self.opening_input = None;
+        if self.input.take().is_some() {
+          self.input_error = Some("View only: the selected window changed.".into());
+        }
+        self.live = window.and_then(|identity| {
+          let id = WindowId::macos(identity.id, identity.pid)?;
+          let requests = Requests::new();
+          let client = requests.client(Arc::new(Local::default()));
+          let session = client.session(
+            Target::MacosDesktop,
+            Some(RemoteWindow {
+              id: id.into(),
+              ..Default::default()
+            }),
+          );
+          Some(LiveWindow {
+            identity,
+            activity: live::Live::open(session, ctx, self.repaint.clone()),
+            _requests: requests,
+          })
+        });
+      }
       view::upload(
         ctx,
         &mut self.texture,
         egui::ColorImage::from_rgb(frame.size, &frame.pixels),
       );
     }
+    if let Some(response) = self
+      .opening_input
+      .as_ref()
+      .and_then(|query| match query.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Disconnected) => Some(Err(io::Error::other("input connection ended"))),
+        Err(TryRecvError::Empty) => None,
+      })
+    {
+      self.opening_input = None;
+      match response {
+        Ok(control) if self.viewing => {
+          let activity = self
+            .live
+            .as_ref()
+            .map(|live| live.activity.publisher())
+            .unwrap_or_default();
+          self.input = Some(input::Input::new(control, activity, ctx));
+        }
+        Ok(_) => {}
+        Err(error) => self.input_error = Some(format!("View only: {error}")),
+      }
+    }
   }
 
   fn close_viewer(&mut self, ctx: &egui::Context) {
     self.input = None;
+    self.opening_input = None;
     self.input_error = None;
     self.chrome.dismiss();
     self.viewing = false;
@@ -282,6 +368,9 @@ impl Viewer {
           let area = ui.available_rect_before_wrap();
           if let Some(image) = view::fit(area, texture.size().map(|v| v as u32)) {
             view::paint(ui, texture, area, &image);
+            if let Some(live) = &self.live {
+              live.activity.paint(ui, &image);
+            }
           }
         } else {
           ui.centered_and_justified(|ui| {
@@ -316,13 +405,17 @@ impl Viewer {
         .as_ref()
         .and_then(|capture| capture.get(main).window_identity());
       self.input_error = match identity {
-        Some((id, pid)) => match WindowInput::open(WindowIdentity { id, pid }) {
-          Ok(input) => {
-            self.input = Some(input::Input::new(input));
-            None
-          }
-          Err(error) => Some(format!("View only: {error}")),
-        },
+        Some((id, pid)) => {
+          let activity = self
+            .live
+            .as_ref()
+            .map(|l| l.activity.publisher())
+            .unwrap_or_default();
+          self.opening_input = Some(crate::background_for(ctx, view::viewer_id(), move || {
+            open_control(WindowIdentity { id, pid }, activity)
+          }));
+          None
+        }
         None => Some("View only: the picker did not provide a window identity".into()),
       };
       self.viewing = true;
@@ -408,12 +501,25 @@ impl WindowState for Viewer {
     let controls = self.chrome.show(
       ui,
       chrome::Status {
-        text: self.input_error.as_deref().unwrap_or("Control enabled"),
+        text: self
+          .input_error
+          .as_deref()
+          .unwrap_or(if self.opening_input.is_some() {
+            "Connecting controls…"
+          } else {
+            "Control enabled"
+          }),
         error: self.input_error.is_some(),
         driver: Some(DRIVER),
         debug: None,
+        turn: self.input.as_ref().and_then(input::Input::turn_state),
       },
     );
+    if controls.toggle_turn
+      && let Some(input) = self.input.as_mut()
+    {
+      self.input_error = input.toggle_turn().err().map(|err| err.to_string());
+    }
     if controls.close {
       self.close_viewer(&ctx);
       return;
@@ -424,12 +530,25 @@ impl WindowState for Viewer {
       let image = view::fill(area, image_size);
       if let (Some(texture), Some(image)) = (&self.texture, &image) {
         view::paint(ui, texture, area, image);
+        if let Some(live) = &self.live {
+          live.activity.paint(ui, image);
+        }
       }
-      if let Some(input) = &mut self.input
-        && let Err(error) = input.update(ui.ctx(), image.as_ref(), &controls.pointer_regions)
-      {
-        self.input = None;
-        self.input_error = Some(format!("View only: {error}"));
+      let [title, resize] = controls.pointer_regions;
+      let roster = self
+        .live
+        .as_ref()
+        .map_or(egui::Rect::NOTHING, |live| live.activity.region.get());
+      if let Some(input) = &mut self.input {
+        match input.update(ui.ctx(), image.as_ref(), &[title, resize, roster]) {
+          Err(e) if e.kind() == io::ErrorKind::WouldBlock => self.input_error = Some(e.to_string()),
+          Err(error) => {
+            self.input = None;
+            self.input_error = Some(format!("View only: {error}"));
+          }
+          Ok(()) if input.delivered() => self.input_error = None,
+          Ok(()) => {}
+        }
       }
       self.size.update(ui.ctx(), image_size, video);
     });

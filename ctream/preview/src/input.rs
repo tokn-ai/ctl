@@ -1,7 +1,10 @@
+mod worker;
+use super::live::Publisher;
 use ctream_client::{
   geometry::{ImageGeometry, Point},
   input::Input as RemoteInput,
 };
+use ctream_proto::live::LiveAction;
 use eframe::egui::{self, Event, Key, Modifiers, Pos2, Vec2};
 use std::{
   collections::BTreeSet,
@@ -9,6 +12,21 @@ use std::{
 };
 
 pub(super) trait Sink {
+  fn turn_state(&self) -> Option<bool> {
+    None
+  }
+  fn toggle_turn(&mut self) -> io::Result<()> {
+    Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "this input channel does not support turns",
+    ))
+  }
+
+  fn begin_event(&mut self) {}
+  fn end_event(&mut self) -> io::Result<()> {
+    Ok(())
+  }
+
   fn dimensions(&self) -> Option<[u32; 2]> {
     None
   }
@@ -20,6 +38,20 @@ pub(super) trait Sink {
 }
 
 impl<R: Read + Send + 'static, W: Write + Send + 'static> Sink for RemoteInput<R, W> {
+  fn turn_state(&self) -> Option<bool> {
+    Self::turn_state(self)
+  }
+  fn toggle_turn(&mut self) -> io::Result<()> {
+    Self::toggle_turn(self)
+  }
+
+  fn begin_event(&mut self) {
+    Self::begin_event(self)
+  }
+  fn end_event(&mut self) -> io::Result<()> {
+    Self::end_event(self)
+  }
+
   fn dimensions(&self) -> Option<[u32; 2]> {
     Self::dimensions(self)
   }
@@ -41,14 +73,88 @@ impl<R: Read + Send + 'static, W: Write + Send + 'static> Sink for RemoteInput<R
   }
 }
 
-pub(super) struct Input<S: Sink> {
+pub(super) struct Forwarder<S: Sink> {
   control: S,
+  activity: Publisher,
+  pending_activity: Vec<LiveAction>,
+  delivered: bool,
+  last_point: Option<[f32; 2]>,
   forwarding: bool,
   modifiers: Modifiers,
   pointer: Option<Pos2>,
   buttons: [bool; egui::NUM_POINTER_BUTTONS],
   keys: BTreeSet<Key>,
   scroll: Vec2,
+}
+
+pub(super) enum Input<S: Sink> {
+  Direct(Forwarder<S>),
+  Worker(worker::Worker),
+}
+
+impl<R: Read + Send + 'static, W: Write + Send + 'static> Input<RemoteInput<R, W>> {
+  pub fn new(control: RemoteInput<R, W>, activity: Publisher, ctx: &egui::Context) -> Self {
+    let upgraded = control.turn_state().is_some();
+    // The daemon broadcasts acknowledged gestures under the input connection's
+    // identity. Only retained hosts need a viewer to publish its own hints.
+    let activity = if control.host_publishes_actions() {
+      Publisher::default()
+    } else {
+      activity
+    };
+    let cancel = control.cancellation();
+    let forwarder = Forwarder::new(control, activity);
+    if upgraded {
+      Self::Worker(worker::Worker::start(forwarder, cancel, ctx.clone()))
+    } else {
+      Self::Direct(forwarder)
+    }
+  }
+}
+
+impl<S: Sink> Input<S> {
+  pub fn turn_state(&self) -> Option<bool> {
+    match self {
+      Self::Direct(i) => i.turn_state(),
+      Self::Worker(w) => Some(w.turn()),
+    }
+  }
+  pub fn toggle_turn(&mut self) -> io::Result<()> {
+    match self {
+      Self::Direct(i) => i.toggle_turn(),
+      Self::Worker(w) => w.toggle(),
+    }
+  }
+  pub fn desktop_size(&self) -> Option<[u32; 2]> {
+    match self {
+      Self::Direct(i) => i.desktop_size(),
+      Self::Worker(w) => w.size,
+    }
+  }
+  pub fn update(
+    &mut self,
+    ctx: &egui::Context,
+    image: Option<&ImageGeometry>,
+    regions: &[egui::Rect],
+  ) -> io::Result<()> {
+    match self {
+      Self::Direct(i) => i.update(ctx, image, regions),
+      Self::Worker(w) => w.update(ctx, image, regions),
+    }
+  }
+  pub fn delivered(&self) -> bool {
+    match self {
+      Self::Direct(i) => i.delivered(),
+      Self::Worker(w) => w.delivered,
+    }
+  }
+  #[cfg(test)]
+  pub fn is_forwarding(&self) -> bool {
+    match self {
+      Self::Direct(i) => i.is_forwarding(),
+      Self::Worker(w) => w.forwarding,
+    }
+  }
 }
 
 fn pixel(image: &ImageGeometry, pos: Pos2) -> Option<[u32; 2]> {
@@ -91,10 +197,14 @@ fn keysym(key: Key) -> String {
   .into()
 }
 
-impl<S: Sink> Input<S> {
-  pub fn new(control: S) -> Self {
+impl<S: Sink> Forwarder<S> {
+  pub fn new(control: S, activity: Publisher) -> Self {
     Self {
       control,
+      activity,
+      pending_activity: Vec::new(),
+      delivered: false,
+      last_point: None,
       forwarding: false,
       modifiers: Modifiers::NONE,
       pointer: None,
@@ -102,6 +212,13 @@ impl<S: Sink> Input<S> {
       keys: BTreeSet::new(),
       scroll: Vec2::ZERO,
     }
+  }
+
+  pub fn turn_state(&self) -> Option<bool> {
+    self.control.turn_state()
+  }
+  pub fn toggle_turn(&mut self) -> io::Result<()> {
+    self.control.toggle_turn()
   }
 
   pub fn desktop_size(&self) -> Option<[u32; 2]> {
@@ -119,6 +236,7 @@ impl<S: Sink> Input<S> {
     image: Option<&ImageGeometry>,
     pointer_regions: &[egui::Rect],
   ) -> io::Result<()> {
+    self.delivered = false;
     if ctx.current_pass_index() != 0 {
       return Ok(());
     }
@@ -136,6 +254,23 @@ impl<S: Sink> Input<S> {
     Ok(())
   }
 
+  pub(super) fn delivered(&self) -> bool {
+    self.delivered
+  }
+
+  fn complete(&mut self) -> io::Result<()> {
+    let result = self.control.end_event();
+    if result.is_ok() {
+      self.delivered |= !self.pending_activity.is_empty();
+      for action in self.pending_activity.drain(..) {
+        self.activity.send(action);
+      }
+    } else {
+      self.pending_activity.clear();
+    }
+    result
+  }
+
   fn sync_modifiers(&mut self, now: Modifiers) -> io::Result<()> {
     let old = self.modifiers;
     for (before, after, name) in [
@@ -146,19 +281,49 @@ impl<S: Sink> Input<S> {
     ] {
       if before != after {
         self.control.key(name, after)?;
+        if after {
+          self.pending_activity.push(LiveAction::PressKeys {});
+        }
       }
     }
     self.modifiers = now;
     Ok(())
   }
 
-  fn reset(&mut self) -> io::Result<()> {
+  fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()> {
+    self.control.move_pointer(x, y, size)?;
+    let point = [
+      (x as f32 + 0.5) / size[0] as f32,
+      (y as f32 + 0.5) / size[1] as f32,
+    ];
+    self.last_point = Some(point);
+    self.pending_activity.push(LiveAction::Move { point });
+    Ok(())
+  }
+
+  fn holding(&self) -> bool {
+    self.buttons.contains(&true) || !self.keys.is_empty() || self.modifiers != Modifiers::NONE
+  }
+
+  fn clear_gesture(&mut self) {
+    self.last_point = None;
     self.modifiers = Modifiers::NONE;
     self.pointer = None;
     self.buttons.fill(false);
     self.keys.clear();
     self.scroll = Vec2::ZERO;
-    self.control.reset()
+  }
+
+  fn reset(&mut self) -> io::Result<()> {
+    self.control.begin_event();
+    self.control.reset()?;
+    if self.buttons.contains(&true)
+      && let Some(point) = self.last_point
+    {
+      self.pending_activity.push(LiveAction::PointerUp { point });
+    }
+    self.clear_gesture();
+    self.complete()
   }
 
   fn forward_button(
@@ -183,10 +348,10 @@ impl<S: Sink> Input<S> {
     if !forward {
       return Ok(());
     }
-    *held = pressed;
+    let previously_down = self.buttons.contains(&true);
     self.sync_modifiers(modifiers)?;
     if let Some([x, y]) = point {
-      self.control.move_pointer(x, y, image.size())?;
+      self.move_pointer(x, y, image.size())?;
     }
     let code = match button {
       egui::PointerButton::Primary => 1,
@@ -195,7 +360,18 @@ impl<S: Sink> Input<S> {
       egui::PointerButton::Extra1 => 8,
       egui::PointerButton::Extra2 => 9,
     };
-    self.control.button(code, pressed)
+    self.control.button(code, pressed)?;
+    self.buttons[button as usize] = pressed;
+    if let Some(point) = self.last_point {
+      if pressed && !previously_down {
+        self
+          .pending_activity
+          .push(LiveAction::PointerDown { point });
+      } else if !self.buttons.contains(&true) {
+        self.pending_activity.push(LiveAction::PointerUp { point });
+      }
+    }
+    Ok(())
   }
 
   fn forward(
@@ -205,7 +381,24 @@ impl<S: Sink> Input<S> {
     modifiers: Modifiers,
     pointer_regions: &[egui::Rect],
   ) -> io::Result<()> {
+    self.forward_while(image, events, modifiers, pointer_regions, || true)
+  }
+
+  fn forward_while(
+    &mut self,
+    image: &ImageGeometry,
+    events: &[Event],
+    modifiers: Modifiers,
+    pointer_regions: &[egui::Rect],
+    running: impl Fn() -> bool,
+  ) -> io::Result<()> {
     for event in events {
+      if !running() {
+        return Err(io::Error::from(io::ErrorKind::Interrupted));
+      }
+      let old_buttons = self.buttons;
+      let old_keys = self.keys.clone();
+      self.control.begin_event();
       match *event {
         Event::PointerGone => self.pointer = None,
         Event::PointerMoved(pos) => {
@@ -213,7 +406,7 @@ impl<S: Sink> Input<S> {
           if (!is_local(pos, pointer_regions) || self.buttons.contains(&true))
             && let Some([x, y]) = pixel(image, pos)
           {
-            self.control.move_pointer(x, y, image.size())?;
+            self.move_pointer(x, y, image.size())?;
           }
         }
         Event::PointerButton {
@@ -234,7 +427,7 @@ impl<S: Sink> Input<S> {
           .is_some_and(|pos| !is_local(pos, pointer_regions) && pixel(image, pos).is_some()) =>
         {
           if let Some([x, y]) = self.pointer.and_then(|point| pixel(image, point)) {
-            self.control.move_pointer(x, y, image.size())?;
+            self.move_pointer(x, y, image.size())?;
           }
           self.sync_modifiers(modifiers)?;
           self.scroll += delta
@@ -247,9 +440,15 @@ impl<S: Sink> Input<S> {
             [(&mut self.scroll.y, 4, 5), (&mut self.scroll.x, 6, 7)]
           {
             let code = if *steps > 0.0 { positive } else { negative };
-            for _ in 0..(steps.abs() as usize).min(32) {
+            let count = (steps.abs() as usize).min(32);
+            for _ in 0..count {
               self.control.button(code, true)?;
               self.control.button(code, false)?;
+            }
+            if count > 0
+              && let Some(point) = self.last_point
+            {
+              self.pending_activity.push(LiveAction::Scroll { point });
             }
             *steps = steps.fract();
           }
@@ -273,6 +472,9 @@ impl<S: Sink> Input<S> {
           };
           if forward {
             self.control.key(&keysym(key), pressed)?;
+            if pressed {
+              self.pending_activity.push(LiveAction::PressKeys {});
+            }
           }
         }
         Event::Copy | Event::Cut | Event::Paste(_) => {
@@ -284,11 +486,32 @@ impl<S: Sink> Input<S> {
           };
           self.control.key(key, true)?;
           self.control.key(key, false)?;
+          self.pending_activity.push(LiveAction::PressKeys {});
         }
         _ => {}
       }
+      if let Err(err) = self.complete() {
+        // A refused batch delivered no edges. Do not send an unmatched
+        // release or publish it as activity when the input device changes.
+        self.buttons = old_buttons;
+        self.keys = old_keys;
+        return Err(err);
+      }
     }
-    self.sync_modifiers(modifiers)
+    if !running() {
+      return Err(io::Error::from(io::ErrorKind::Interrupted));
+    }
+    self.control.begin_event();
+    self.sync_modifiers(modifiers)?;
+    self.complete()
+  }
+}
+
+impl<S: Sink> Drop for Forwarder<S> {
+  fn drop(&mut self) {
+    if self.buttons.contains(&true) {
+      let _ = self.reset();
+    }
   }
 }
 
@@ -299,7 +522,7 @@ mod tests {
   #[test]
   fn wheel_remaps_stationary_pointer_after_viewport_and_capture_resize() {
     let (session, observed) = crate::test_support::session(b"");
-    let mut input = Input::new(session.input().unwrap());
+    let mut input = Forwarder::new(session.input().unwrap(), Default::default());
     let geometry = |width, height, frame| {
       crate::view::fit(
         egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height)),

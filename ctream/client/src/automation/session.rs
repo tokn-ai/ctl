@@ -1,12 +1,7 @@
 use super::{ActiveCapture, Controls, closed};
 use crate::{Session, media::Frame, transport::Transport};
 use ctream_proto::{Action, ActionResult, Target};
-use std::{
-  io,
-  sync::{Arc, mpsc},
-  thread,
-  time::Duration,
-};
+use std::{io, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputMode {
@@ -63,6 +58,15 @@ impl<T: Transport> Automation<T> {
     if let Some(capture) = self.capture.as_mut() {
       capture.after_action();
     }
+  }
+
+  /// Preserve observation freshness when a host-owned worker dispatches the input.
+  pub(crate) fn prepare_remote_action(&mut self) -> io::Result<()> {
+    if let Some(capture) = &self.capture {
+      capture.check()?;
+    }
+    self.after_action();
+    Ok(())
   }
 
   /// Apply an accessibility action to the selected window. The next
@@ -152,26 +156,7 @@ impl<T: Transport> Automation<T> {
   // already acknowledged, so teardown can bound its wait for the peer.
   fn close_idle_controls(mut controls: Controls<T::Reader, T::Writer>) -> io::Result<()> {
     let input = controls.input.take().ok_or_else(closed)?;
-    let cancellation = input.cancellation();
-    let (done, result) = mpsc::channel();
-    thread::Builder::new()
-      .name("ctream-automation-input-close".into())
-      .spawn(move || {
-        let _ = done.send(input.finish());
-      })?;
-    match result.recv_timeout(Duration::from_secs(5)) {
-      Ok(result) => result,
-      Err(mpsc::RecvTimeoutError::Disconnected) => {
-        Err(io::Error::other("input worker exited unexpectedly"))
-      }
-      Err(mpsc::RecvTimeoutError::Timeout) => {
-        cancellation.cancel();
-        Err(io::Error::new(
-          io::ErrorKind::TimedOut,
-          "input did not close after EOF",
-        ))
-      }
-    }
+    input.finish_bounded()
   }
 
   fn close(&mut self) -> io::Result<()> {

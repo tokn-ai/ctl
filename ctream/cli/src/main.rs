@@ -1,6 +1,8 @@
 mod relay;
 
-use ctream_client::{Client, options::ConnectionOptions, sdk, transport::Transport};
+use ctream_client::{
+  Client, generate_agent_id, options::ConnectionOptions, sdk, transport::Transport,
+};
 use ctream_platform::{discover_sessions, windows};
 use ctream_proto::{Display, Session, Target, Window};
 use std::{env, ffi::OsString, io, process::ExitCode};
@@ -9,6 +11,8 @@ const USAGE: &str = "Usage: ctream [OPTIONS] list [--json]
        ctream [OPTIONS] windows TARGET [--json]
        ctream [OPTIONS] do TARGET [--window ID] [--protocol 1.0.1]
        ctream [OPTIONS] session TARGET [--agent-id ID] [--window ID] [--protocol 1.0.4]
+       ctream [OPTIONS] watch TARGET [--agent-id ID] [--window ID] [--protocol 1.0.5]
+       ctream [OPTIONS] session|watch TARGET [--agent-id ID] [--window ID] --protocol 1.0.7
        ctream [OPTIONS] session TARGET [--window ID] --protocol 1.0.2
        ctream [OPTIONS] session TARGET --agent-id ID [--window ID] [--protocol 1.0.3]
 
@@ -20,6 +24,7 @@ Connection options (before the command):
 
 do reads one JSON operation from stdin and writes its JSON result to stdout.
 session serves one JSON operation per line and flushes one reply per operation.
+watch streams a participant roster and live action events until its stdin closes.
 By default, session assigns a word#hhhh agent ID when --agent-id is omitted.
 Select 1.0.2 explicitly for an anonymous session.
 Operations: capabilities, screenshot, move, click, drag, scroll, press_keys,
@@ -33,7 +38,14 @@ const SESSION_PROTOCOL: &str = "1.0.2";
 const NAMED_PROTOCOL: &str = "1.0.3";
 const GENERATED_ID_PROTOCOL: &str = "1.0.4";
 
+const WATCH_PROTOCOL: &str = "1.0.5";
+const TURN_PROTOCOL: &str = "1.0.6";
+const DAEMON_PROTOCOL: &str = "1.0.7";
+
 enum Mode {
+  Watch(String),
+  TurnSession(String, &'static str),
+  TurnWatch(String, &'static str),
   Once,
   Session,
   Named(String),
@@ -56,17 +68,24 @@ fn invalid(message: &str) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-fn generate_agent_id() -> String {
-  // The same fixed-size word list is shipped with the TypeScript SDK.
-  let words: [&str; 32] = serde_json::from_str(include_str!("../../sdk/src/agent-words.json"))
-    .expect("invalid bundled agent word list");
-  let [index, high, low, ..] = *uuid::Uuid::new_v4().as_bytes();
-  let word = words[usize::from(index) % words.len()];
-  format!("{word}#{high:02x}{low:02x}")
-}
-
 fn sdk_mode(command: &str, protocol: Option<&str>, agent_id: Option<String>) -> io::Result<Mode> {
   match (command, protocol, agent_id) {
+    ("session" | "watch", Some(wire @ (TURN_PROTOCOL | DAEMON_PROTOCOL)), id) => {
+      let host = if wire == DAEMON_PROTOCOL {
+        ctream_proto::DAEMON_VERSION
+      } else {
+        ctream_proto::TURN_VERSION
+      };
+      let id = id.unwrap_or_else(generate_agent_id);
+      Ok(if command == "watch" {
+        Mode::TurnWatch(id, host)
+      } else {
+        Mode::TurnSession(id, host)
+      })
+    }
+    ("watch", None | Some(WATCH_PROTOCOL), id) => {
+      Ok(Mode::Watch(id.unwrap_or_else(generate_agent_id)))
+    }
     ("do", None | Some(SDK_PROTOCOL), None) => Ok(Mode::Once),
     ("session", Some(SESSION_PROTOCOL), None) => Ok(Mode::Session),
     ("session", Some(NAMED_PROTOCOL), Some(id))
@@ -96,7 +115,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let command = loop {
     let argument = arguments
       .next()
-      .ok_or_else(|| invalid("expected list, windows, do, or session"))?;
+      .ok_or_else(|| invalid("expected list, windows, do, session, or watch"))?;
     let argument = argument
       .to_str()
       .ok_or_else(|| invalid("invalid command argument"))?;
@@ -112,7 +131,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
           .ok_or_else(|| invalid("--host needs an SSH destination"))?;
         host = Some(value.to_owned());
       }
-      "list" | "windows" | "do" | "session" => break argument.to_owned(),
+      "list" | "windows" | "do" | "session" | "watch" => break argument.to_owned(),
       argument if connection.parse_option(argument, &mut arguments)? => {}
       _ => return Err(invalid("unexpected global option")),
     }
@@ -120,7 +139,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
   let mut json = false;
   let mut target = None;
   let mut window = None;
-  let is_sdk = matches!(command.as_str(), "do" | "session");
+  let is_sdk = matches!(command.as_str(), "do" | "session" | "watch");
   let mut selected_protocol = None;
   let mut agent_id = None;
   while let Some(argument) = arguments.next() {
@@ -143,7 +162,9 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Option<Opt
             .ok_or_else(|| invalid("--protocol needs a version"))?,
         );
       }
-      Some("--agent-id") if command == "session" && agent_id.is_none() => {
+      Some("--agent-id")
+        if matches!(command.as_str(), "session" | "watch") && agent_id.is_none() =>
+      {
         agent_id = Some(
           arguments
             .next()
@@ -279,7 +300,32 @@ fn run_sdk<T: Transport>(
   window: Option<String>,
 ) -> io::Result<()> {
   match mode {
-    Mode::Named(agent_id) => relay::named(transport, target, &agent_id, window),
+    Mode::TurnSession(id, host_version) => {
+      relay::run(transport, host_version, "turn-session", target, &id, window)
+    }
+    Mode::TurnWatch(id, host_version) => {
+      relay::run(transport, host_version, "turn-room", target, &id, window)
+    }
+    Mode::Watch(agent_id) => relay::run(
+      transport,
+      ctream_proto::LIVE_VERSION,
+      "live-room",
+      target,
+      &agent_id,
+      window,
+    ),
+    Mode::Named(agent_id) => {
+      let version =
+        ctream_proto::agent_id_version(&agent_id).ok_or_else(|| invalid("invalid agent ID"))?;
+      relay::run(
+        transport,
+        version,
+        "attributed-session",
+        target,
+        &agent_id,
+        window,
+      )
+    }
     Mode::Once => sdk::run(
       &Client::new(transport),
       target,

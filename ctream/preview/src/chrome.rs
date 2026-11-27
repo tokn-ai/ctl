@@ -11,6 +11,7 @@ pub(super) const BAR_HEIGHT: f32 = 34.0;
 pub(super) const BUTTON_WIDTH: f32 = 40.0;
 const BUTTON_STRIP_WIDTH: f32 = 3.0 * BUTTON_WIDTH;
 const DEBUG_BUTTON_WIDTH: f32 = BUTTON_WIDTH;
+const TURN_BUTTON_WIDTH: f32 = 85.0;
 const CONTROL_SEPARATOR_WIDTH: f32 = 12.0;
 #[cfg(target_os = "macos")]
 const MIN_DRAG_WIDTH: f32 = 28.0;
@@ -26,11 +27,17 @@ pub(super) struct Status<'a> {
   pub error: bool,
   pub driver: Option<&'a str>,
   pub debug: Option<bool>,
+  pub turn: Option<bool>,
 }
 
 impl Status<'_> {
   fn button_strip_width(self) -> f32 {
     BUTTON_STRIP_WIDTH
+      + if self.turn.is_some() {
+        TURN_BUTTON_WIDTH
+      } else {
+        0.0
+      }
       + if self.debug.is_some() {
         DEBUG_BUTTON_WIDTH + CONTROL_SEPARATOR_WIDTH
       } else {
@@ -43,6 +50,7 @@ pub(super) struct Frame {
   pub pointer_regions: [Rect; 2],
   pub close: bool,
   pub toggle_debug: bool,
+  pub toggle_turn: bool,
 }
 
 impl Frame {
@@ -51,11 +59,13 @@ impl Frame {
       pointer_regions: [toolbar, resize],
       close: false,
       toggle_debug: false,
+      toggle_turn: false,
     }
   }
 
   fn apply(mut self, ctx: &egui::Context, action: Option<Action>) -> Self {
     self.close = action.is_some_and(|action| action.apply(ctx));
+    self.toggle_turn = matches!(action, Some(Action::ToggleTurn));
     self.toggle_debug = matches!(action, Some(Action::ToggleDebug));
     self
   }
@@ -235,6 +245,7 @@ enum Action {
   Minimize,
   Maximize(bool),
   ToggleDebug,
+  ToggleTurn,
   Close,
 }
 
@@ -244,7 +255,7 @@ impl Action {
       Self::Drag => ViewportCommand::StartDrag,
       Self::Minimize => ViewportCommand::Minimized(true),
       Self::Maximize(maximized) => ViewportCommand::Maximized(maximized),
-      Self::ToggleDebug => return false,
+      Self::ToggleDebug | Self::ToggleTurn => return false,
       Self::Close => return true,
     };
     ctx.send_viewport_cmd(command);
@@ -365,6 +376,17 @@ fn title_bar(
     && debug_button(ui, bounds, enabled)
   {
     return Some(Action::ToggleDebug);
+  }
+  if let Some(owned) = status.turn {
+    let bounds = button_slot(bounds, buttons_left + TURN_BUTTON_WIDTH, TURN_BUTTON_WIDTH);
+    let button = ui.put(
+      bounds,
+      egui::Button::new(if owned { "Release turn" } else { "Take turn" }),
+    );
+    if button.clicked() {
+      button.surrender_focus();
+      return Some(Action::ToggleTurn);
+    }
   }
   dragging.then_some(Action::Drag)
 }

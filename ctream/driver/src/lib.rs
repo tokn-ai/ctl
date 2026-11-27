@@ -28,6 +28,39 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+/// A delegated child agent explicitly reported failure. Other exit codes,
+/// including a launcher's general failure, cannot attest to a driver's result.
+pub const DELEGATED_FAILURE_EXIT: u8 = 65;
+
+/// A mutation reached the next layer, but its outcome could not be confirmed.
+#[derive(Debug)]
+pub struct UnconfirmedDelivery(io::Error);
+
+impl UnconfirmedDelivery {
+  pub fn error(error: io::Error) -> io::Error {
+    if Self::is(&error) {
+      return error;
+    }
+    io::Error::new(error.kind(), Self(error))
+  }
+
+  pub fn is(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Self>())
+  }
+}
+
+impl std::fmt::Display for UnconfirmedDelivery {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    self.0.fmt(f)
+  }
+}
+
+impl std::error::Error for UnconfirmedDelivery {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    Some(&self.0)
+  }
+}
+
 /// Source-side capture cadence. Timed providers default to their legacy 8 FPS;
 /// native event-driven sources may use a different default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +146,15 @@ pub trait CaptureWindow {
 /// An input endpoint. Current helper adapters inherit the host's standard IO.
 pub trait InputSource {
   fn run(self) -> Result<()>;
+
+  /// Drive the same synchronized backend over private pipes. The host can
+  /// arbitrate an event and wait for native completion before admitting a peer.
+  fn run_piped(self, _input: io::PipeReader, _output: io::PipeWriter) -> Result<()>
+  where
+    Self: Sized,
+  {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "piped input is unavailable").into())
+  }
 
   /// Run the 1.1.14 input endpoint, including driver acknowledgements.
   fn run_synchronized(self) -> Result<()>

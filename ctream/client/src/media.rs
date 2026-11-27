@@ -39,6 +39,12 @@ pub struct Capture<R: Read, W: Write> {
   video: Option<VideoInfo>,
 }
 
+/// Capture and its optional private input capability for a native viewer.
+pub struct ViewerCapture<R: Read, W: Write> {
+  pub capture: Capture<R, W>,
+  pub lease: Option<String>,
+}
+
 pub struct CaptureLifetime<W: Write> {
   writer: Option<W>,
   cancellation: Cancellation,

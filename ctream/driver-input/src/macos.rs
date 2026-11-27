@@ -151,6 +151,24 @@ impl WindowInput {
     })
   }
 
+  /// Apply one retained wire event to this already process-bound window.
+  pub fn dispatch(&mut self, line: &str) -> io::Result<()> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid macOS input command");
+    let fields: Vec<_> = line.split_ascii_whitespace().collect();
+    match fields.as_slice() {
+      ["move", x, y, width, height] => {
+        let value = |s: &str| s.parse::<u32>().map_err(|_| invalid());
+        self.move_pointer(value(x)?, value(y)?, [value(width)?, value(height)?])
+      }
+      ["button", code, pressed @ ("0" | "1")] => {
+        self.button(code.parse().map_err(|_| invalid())?, *pressed == "1")
+      }
+      ["key", name, pressed @ ("0" | "1")] => self.key(name, *pressed == "1"),
+      ["reset"] => self.reset(),
+      _ => Err(invalid()),
+    }
+  }
+
   pub fn move_pointer(&mut self, x: u32, y: u32, size: [u32; 2]) -> io::Result<()> {
     let point = FramePoint::new([x, y], size)?;
     self.pointer = Some(point);

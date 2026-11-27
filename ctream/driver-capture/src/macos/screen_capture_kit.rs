@@ -11,7 +11,7 @@ use std::{
   slice,
 };
 
-const DEFAULT_MAX_FPS: i32 = 30;
+pub const DEFAULT_MAX_FPS: u16 = 30;
 
 pub enum Event {
   Frame { size: [usize; 2], pixels: Vec<u8> },
@@ -88,7 +88,7 @@ impl Capture {
   /// Opens the native picker on the main thread. Frame events may arrive on
   /// the capture queue, so the callback must be thread-safe and nonblocking.
   pub fn start(callback: impl Fn(Event) + Send + Sync + 'static) -> io::Result<Self> {
-    Self::start_source(ptr::null_mut(), DEFAULT_MAX_FPS, false, callback)
+    Self::start_source(ptr::null_mut(), i32::from(DEFAULT_MAX_FPS), false, callback)
   }
 
   /// Captures the selected window from a discovery snapshot on the main thread.
@@ -96,16 +96,39 @@ impl Capture {
     window: &Window,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
-    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, false, callback)
+    Self::start_source(
+      window.native.0.as_ptr(),
+      i32::from(DEFAULT_MAX_FPS),
+      false,
+      callback,
+    )
   }
 
   /// Capture a directly selected window for an independently leased session.
-  /// Each handle owns its own stream, including when both select the same window.
+  /// The host can share this stream across independently leased subscribers.
   pub fn start_session_window(
     window: &Window,
     callback: impl Fn(Event) + Send + Sync + 'static,
   ) -> io::Result<Self> {
-    Self::start_source(window.native.0.as_ptr(), DEFAULT_MAX_FPS, true, callback)
+    Self::start_source(
+      window.native.0.as_ptr(),
+      i32::from(DEFAULT_MAX_FPS),
+      true,
+      callback,
+    )
+  }
+
+  pub fn start_session_window_with_options(
+    window: &Window,
+    options: CaptureOptions,
+    callback: impl Fn(Event) + Send + Sync + 'static,
+  ) -> io::Result<Self> {
+    Self::start_source(
+      window.native.0.as_ptr(),
+      i32::from(options.max_fps()),
+      true,
+      callback,
+    )
   }
 
   /// Captures a listed window on the main thread with a selected frame-rate cap.

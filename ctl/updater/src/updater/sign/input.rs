@@ -160,6 +160,65 @@ mod tests {
     assert_eq!(fs::read_dir(app.parent().unwrap()).unwrap().count(), 1);
   }
 
+  #[tokio::test]
+  async fn ad_hoc_signing_seals_a_copy_without_a_provisioning_profile() {
+    use crate::updater::sign::{SigningMode, sign_for_install};
+    use ctl_client::remote_bundle::desktop::DesktopTarget;
+
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    let fixture = Fixture::new(|app| {
+      let contents = app.join("Contents");
+      let source = app.join("fixture.c");
+      fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+      let executable = contents.join("MacOS/ctmux-app");
+      fs::remove_file(&executable).unwrap();
+      let result = Command::new("/usr/bin/clang")
+        .arg(&source)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+      assert!(result.status.success(), "{result:?}");
+      fs::remove_file(source).unwrap();
+      for relative in [
+        "MacOS/ctmuxd",
+        "MacOS/ctl-taskd",
+        "Helpers/ctld.app/Contents/MacOS/ctld",
+      ] {
+        fs::copy(&executable, contents.join(relative)).unwrap();
+      }
+    });
+    let original = fs::read(&fixture.archive).unwrap();
+    let target = DesktopTarget::native().unwrap();
+    let archive = sign_for_install(
+      &fixture.root,
+      &fixture.archive,
+      VERSION,
+      target,
+      &fixture.root,
+      SigningMode::AdHoc,
+      false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(fs::read(&fixture.archive).unwrap(), original);
+    let transported = fixture.root.join("verify");
+    private_fs::create_directory(&transported).unwrap();
+    let signed = prepare(&archive, &transported, VERSION).unwrap();
+    assert!(
+      !signed
+        .join("Contents/Helpers/ctld.app/Contents/embedded.provisionprofile")
+        .exists()
+    );
+    let arch = match target {
+      DesktopTarget::MacArm64 => "arm64",
+      DesktopTarget::MacX64 => "x86_64",
+      _ => unreachable!(),
+    };
+    fs::write(signed.join("Contents/MacOS/ctmuxd"), b"corrupted").unwrap();
+    assert!(macos::verify_local_signature(&signed, SigningMode::AdHoc, arch).is_err());
+  }
+
   #[test]
   fn rejects_aliases_for_directories_the_signer_writes_to() {
     let fixture = Fixture::new(|app| {

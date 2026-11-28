@@ -1,6 +1,8 @@
 //! Explicit complete-bundle import, selection and packaging for either purpose.
 
 pub mod inventory;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_runtime;
 
 use ctl_core::bundles::{Bundle, MANIFEST_FILE, MAX_FILE_BYTES, Manifest, Purpose, Source, Store};
 use ctl_core::component::ComponentInfo;
@@ -60,6 +62,9 @@ fn remote_payload(
     .clone()
     .ok_or_else(|| invalid("bundle lacks component advertisements"))?;
   let files = read_archive(&bundle.archive)?;
+  if target.ends_with("-apple-darwin") && ctl_core::bundles::macos_ad_hoc_receipt(&files)? {
+    return Err(invalid("a remote package cannot select local ad hoc signing").into());
+  }
   let manifest =
     Manifest::new(target, source, components, &files)?.with_distribution_id(&bundle.bundle_id)?;
   Ok(RemotePayload { manifest, files })
@@ -288,6 +293,10 @@ fn helper_receipt(directory: &Path) -> io::Result<Vec<u8>> {
 ///
 /// # Errors
 /// Rejects incompatible contracts and invalid signed macOS helper packages.
+pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
+  verify_local_for_activation(home, bundle, false).await
+}
+
 #[cfg_attr(
   not(target_os = "macos"),
   expect(
@@ -295,7 +304,11 @@ fn helper_receipt(directory: &Path) -> io::Result<Vec<u8>> {
     reason = "native trust verification is asynchronous on macOS"
   )
 )]
-pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
+pub(crate) async fn verify_local_for_activation(
+  home: &Path,
+  bundle: &Bundle,
+  allow_ad_hoc: bool,
+) -> io::Result<()> {
   if !compatible(&bundle.manifest.components) {
     return Err(invalid(
       "bundle is incompatible with this client; choose a compatible complete build",
@@ -304,6 +317,14 @@ pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
   #[cfg(target_os = "macos")]
   {
     let files = bundle.read_files()?;
+    if ctl_core::bundles::macos_ad_hoc_receipt(&files)? {
+      if !allow_ad_hoc {
+        return Err(invalid("ad hoc macOS runtime activation requires --ad-hoc"));
+      }
+      return macos_runtime::verify_ad_hoc(bundle, &files)
+        .await
+        .map(|_| ());
+    }
     let receipt = files
       .get("ctld-package.json")
       .ok_or_else(|| invalid("local macOS bundle lacks its signed helper receipt"))?;
@@ -317,7 +338,7 @@ pub async fn verify_local(home: &Path, bundle: &Bundle) -> io::Result<()> {
     }
   }
   #[cfg(not(target_os = "macos"))]
-  let _ = home;
+  let _ = (home, allow_ad_hoc);
   Ok(())
 }
 
@@ -363,6 +384,13 @@ pub(crate) fn package_bundle(bundle: &Bundle) -> io::Result<crate::remote_bundle
     return Err(invalid("bundle is incompatible with this client"));
   }
   let files = bundle.read_files()?;
+  if bundle.manifest.target_triple.ends_with("-apple-darwin")
+    && ctl_core::bundles::macos_ad_hoc_receipt(&files)?
+  {
+    return Err(invalid(
+      "a locally ad hoc signed runtime cannot be uploaded; select its original build",
+    ));
+  }
   let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
   let mut archive = tar::Builder::new(encoder);
   for (name, bytes) in &files {

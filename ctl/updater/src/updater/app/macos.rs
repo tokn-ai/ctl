@@ -10,10 +10,14 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use crate::updater::sign::{SigningMode, verify_embedded_profile};
+
 pub(super) const APP_NAME: &str = "ctmux.app";
 const BUNDLE_IDENTIFIER: &str = "dev.tokn-ai.ctl.ctmux";
 const EXECUTABLE_NAME: &str = "ctmux-app";
 const EXECUTABLE_PATH: &str = "Contents/MacOS/ctmux-app";
+const HELPER_PATH: &str = "Contents/Helpers/ctld.app";
+const HELPER_IDENTIFIER: &str = "dev.tokn-ai.ctl.ctld";
 const MAX_EXPANDED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ENTRIES: usize = 8192;
 
@@ -53,11 +57,7 @@ pub(super) fn verify_existing(
   let requirement = format!(
     "=anchor apple generic and identifier \"{BUNDLE_IDENTIFIER}\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
   );
-  let architecture = match std::env::consts::ARCH {
-    "aarch64" => "arm64",
-    "x86_64" => "x86_64",
-    _ => return Err(invalid("unsupported macOS architecture")),
-  };
+  let architecture = native_architecture()?;
   require_success(
     Command::new("/usr/bin/codesign")
       .args(["--verify", "--deep", "--strict", "-R"])
@@ -88,6 +88,133 @@ pub(super) fn verify_existing(
   Ok(())
 }
 
+pub(super) fn verify_local_existing(
+  app: &Path,
+  version: &str,
+  mode: SigningMode,
+) -> io::Result<()> {
+  verify_existing(app, version, DesktopSigning::Unsigned)?;
+  verify_local_signature(app, mode, native_architecture()?)
+}
+
+pub(in crate::updater) fn verify_local_signature(
+  app: &Path,
+  mode: SigningMode,
+  arch: &str,
+) -> io::Result<()> {
+  let helper = app.join(HELPER_PATH);
+  let profile = helper.join("Contents/embedded.provisionprofile");
+  match mode {
+    SigningMode::AdHoc => {
+      if exists(&profile)? {
+        return Err(invalid(
+          "ad hoc helper unexpectedly contains a provisioning profile",
+        ));
+      }
+      verify_ad_hoc(&helper)?;
+    }
+    SigningMode::Provision => verify_provisioned_helper(&helper, &profile)?,
+    SigningMode::DeveloperId => {
+      return Err(invalid(
+        "Developer ID builds require notarization verification",
+      ));
+    }
+  }
+  require_success(
+    Command::new("/usr/bin/codesign")
+      .args(["--verify", "--deep", "--strict", "--architecture", arch])
+      .arg(app),
+    "local macOS application signature verification",
+  )?;
+  verify_ad_hoc(app)?;
+
+  for item in [
+    app.join("Contents/MacOS/ctmuxd"),
+    app.join("Contents/MacOS/ctl-taskd"),
+    helper,
+  ] {
+    require_success(
+      Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "--architecture", arch])
+        .arg(item),
+      "local macOS executable architecture verification",
+    )?;
+  }
+  Ok(())
+}
+
+fn native_architecture() -> io::Result<&'static str> {
+  match std::env::consts::ARCH {
+    "aarch64" => Ok("arm64"),
+    "x86_64" => Ok("x86_64"),
+    _ => Err(invalid("unsupported macOS architecture")),
+  }
+}
+
+fn verify_ad_hoc(item: &Path) -> io::Result<()> {
+  let signature = signature_details(item)?;
+  if !String::from_utf8_lossy(&signature.stderr)
+    .lines()
+    .any(|line| line == "Signature=adhoc")
+  {
+    return Err(invalid("expected an ad hoc macOS code signature"));
+  }
+  Ok(())
+}
+
+fn signature_details(item: &Path) -> io::Result<Output> {
+  require_success(
+    Command::new("/usr/bin/codesign")
+      .args(["--display", "--verbose=2"])
+      .arg(item),
+    "macOS code signature metadata",
+  )
+}
+
+fn verify_provisioned_helper(helper: &Path, profile: &Path) -> io::Result<()> {
+  let signature = signature_details(helper)?;
+  let details = String::from_utf8_lossy(&signature.stderr);
+  let team = details
+    .lines()
+    .find_map(|line| line.strip_prefix("TeamIdentifier="))
+    .filter(|team| {
+      team.len() == 10
+        && team
+          .bytes()
+          .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+    .ok_or_else(|| invalid("the provisioned helper lacks a valid Apple Team ID"))?;
+  if !details.lines().any(|line| {
+    line.starts_with("Authority=Apple Development:") || line.starts_with("Authority=Mac Developer:")
+  }) {
+    return Err(invalid(
+      "the provisioned helper lacks an Apple Development signature",
+    ));
+  }
+  verify_embedded_profile(profile, team)?;
+  let requirement = format!(
+    "=anchor apple generic and identifier \"{HELPER_IDENTIFIER}\" and certificate leaf[subject.OU] = \"{team}\""
+  );
+  require_success(
+    Command::new("/usr/bin/codesign")
+      .args(["--verify", "--strict", "-R", &requirement])
+      .arg(helper),
+    "Apple Development helper signature verification",
+  )?;
+  Ok(())
+}
+
+pub(super) fn stage_local(
+  archive: &Path,
+  staging: &Path,
+  version: &str,
+  mode: SigningMode,
+) -> io::Result<PathBuf> {
+  let app = unpack(archive, staging)?;
+  verify_local_existing(&app, version, mode)?;
+  Ok(app)
+}
+
 pub(in crate::updater) fn stage(
   archive: &Path,
   staging: &Path,
@@ -104,9 +231,10 @@ pub(super) fn stage_provided(
   staging: &Path,
   version: Option<&str>,
 ) -> io::Result<PathBuf> {
-  let app = unpack(archive, staging)?;
-  let actual = installed_version(&app)?;
-  verify_existing(&app, version.unwrap_or(&actual), DesktopSigning::Unsigned)?;
+  let (app, actual) = stage_for_signing(archive, staging)?;
+  if version.is_some_and(|expected| expected != actual) {
+    return Err(invalid("application version does not match the release"));
+  }
   let native_architectures: &[&str] = match std::env::consts::ARCH {
     "aarch64" => &["arm64", "arm64e"],
     "x86_64" => &["x86_64"],
@@ -127,6 +255,42 @@ pub(super) fn stage_provided(
     ));
   }
   Ok(app)
+}
+
+pub(super) fn stage_for_signing(archive: &Path, staging: &Path) -> io::Result<(PathBuf, String)> {
+  let app = unpack(archive, staging)?;
+  let version = installed_version(&app)?;
+  verify_existing(&app, &version, DesktopSigning::Unsigned)?;
+  Ok((app, version))
+}
+
+pub(super) fn verify_provided_distribution(app: &Path, version: &str) -> io::Result<bool> {
+  let details = Command::new("/usr/bin/codesign")
+    .args(["--display", "--verbose=4"])
+    .arg(app)
+    .env("LC_ALL", "C")
+    .output()?;
+  let details_text = String::from_utf8_lossy(&details.stderr);
+  if !details.status.success() {
+    if details_text
+      .lines()
+      .any(|line| line.ends_with(": code object is not signed at all"))
+    {
+      return Ok(false);
+    }
+    return Err(invalid(format!(
+      "could not inspect the provided macOS signature: {}",
+      details_text.trim()
+    )));
+  }
+  if !details_text
+    .lines()
+    .any(|line| line.starts_with("Authority=Developer ID Application:"))
+  {
+    return Ok(false);
+  }
+  verify_existing(app, version, DesktopSigning::Signed)?;
+  Ok(true)
 }
 
 pub(super) fn matches(installed: &Path, staged: &Path) -> io::Result<bool> {

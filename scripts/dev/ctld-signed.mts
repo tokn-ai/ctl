@@ -97,6 +97,7 @@ export async function signDevelopmentHelper(
     const team = /^TeamIdentifier=([A-Z0-9]{10})$/m.exec((await invoke("codesign", ["-d", "--verbose=2", app])).stderr)?.[1];
     if (!team) throw new Error("signed ctld does not report a valid Apple Team ID");
     if (renewal && team !== renewal.expected_team) throw new Error("renewed ctld must use the installed helper's Apple Team");
+    if (team !== profile.team) throw new Error("signed ctld does not match the selected Apple Team");
     await regularFile(identity_path);
     const identity = (await readFile(identity_path, "utf8")).trim();
     if (!/^[A-Fa-f0-9]{40}$/.test(identity)) throw new Error("invalid matching signing certificate fingerprint");

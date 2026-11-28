@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -69,6 +69,28 @@ test("an explicit profile override is exclusive rather than replaced by a discov
   assert.equal(input.calls.some((call) => call[0] === "xcodebuild"), false);
 });
 
+test("a chosen Apple Team is reused and an explicit override does not replace it", async (t) => {
+  const input = await fixture(t);
+  const first = await addProfile(input, "first.profile", { application: identifier, expiration: "2028-01-01T00:00:00Z" });
+  const other = await addProfile(input, "other.profile", { application: "TEAM999ABC.dev.tokn-ai.ctl.ctld", expiration: "2099-01-01T00:00:00Z" });
+  const profile_directory = join(input.options.repository_root, "ctl-profile");
+  input.options.env = { CTL_DATA_DIR: profile_directory };
+  input.options.choose_team = async (teams) => {
+    assert.deepEqual(teams, ["TEAM123ABC", "TEAM999ABC"]);
+    return "TEAM123ABC";
+  };
+  assert.equal((await prepareProvisioningProfile(input.options)).path, first);
+  input.options.choose_team = async () => assert.fail("the saved team should have won");
+  assert.equal((await prepareProvisioningProfile(input.options)).path, first);
+  assert.equal((await prepareProvisioningProfile({
+    ...input.options, env: { ...input.options.env, CTLD_PROVISIONING_PROFILE: other },
+  })).path, other);
+  assert.equal((await prepareProvisioningProfile(input.options)).path, first);
+  const preference = join(profile_directory, "ctlup/signing/provisioning-team");
+  assert.equal(await readFile(preference, "utf8"), "TEAM123ABC\n");
+  assert.deepEqual(await readdir(dirname(preference)), ["provisioning-team"]);
+});
+
 test("configured Personal Team provisioning automatically refreshes an expired profile", async (t) => {
   const input = await fixture(t);
   const expired = await addProfile(input, "expired.profile", { application: identifier, expiration: "2026-01-01T00:00:00Z" });
@@ -97,7 +119,7 @@ test("renewal refreshes an expired profile in a private copy of the provisioning
   const input = await fixture(t);
   input.options.expected_team = "TEAM123ABC";
   await mkdir(input.options.target_directory);
-  const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning");
+  const template = join(input.options.repository_root, "ctl/updater/src/updater/sign/ctld/provisioning");
   const project = join(template, "ctld-provisioning.xcodeproj/project.pbxproj");
   const source = join(template, "ctld-provisioning/App.swift");
   for (const file of [project, source]) {
@@ -126,7 +148,7 @@ test("renewal retains an embedded profile until the signer has used it", async (
   const input = await fixture(t);
   input.options.expected_team = "TEAM123ABC";
   await mkdir(input.options.target_directory);
-  const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning");
+  const template = join(input.options.repository_root, "ctl/updater/src/updater/sign/ctld/provisioning");
   await mkdir(template, { recursive: true });
   const run = input.options.run!;
   let embedded: string | undefined;
@@ -152,7 +174,7 @@ test("renewal retains an embedded profile until the signer has used it", async (
 
 test("provisioning opens a copied Xcode project and preserves the saved team selection", async (t) => {
   const input = await fixture(t);
-  const template = join(input.options.repository_root, "scripts/dev/macos/ctld-provisioning/ctld-provisioning.xcodeproj");
+  const template = join(input.options.repository_root, "ctl/updater/src/updater/sign/ctld/provisioning/ctld-provisioning.xcodeproj");
   await mkdir(template, { recursive: true });
   await writeFile(join(template, "project.pbxproj"), 'DEVELOPMENT_TEAM = "";');
   await openProvisioningProject(input.options);

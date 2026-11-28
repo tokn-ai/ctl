@@ -222,11 +222,13 @@ release. Nightly and PR packages use the verified GitHub Actions artifact for
 the selected revision. macOS signatures and Windows portable package checks
 remain part of package verification.
 
-On macOS, an unsigned published app is signed and notarized before activation
-when the Apple signing credentials and Developer ID Application identity are
-available locally. Otherwise installation continues unsigned and prints a
-message. The verified downloaded archive stays in the cache, and the signed
-copy uses its own archive digest for installation and repair.
+On macOS, `ctlup` verifies already signed builds as shipped. For an unsigned
+build, it requires Developer ID signing and notarization by default. Use
+`--provision` to sign the helper with a matching Xcode development profile, or
+`--ad-hoc` for a local signature without Apple credentials. The flags apply to
+both the runtime and the desktop app. Updates reuse the chosen mode. The
+verified original archive stays in the cache, and the signed copy has its own
+digest for installation and repair.
 
 Open the desktop from the profile's `apps/` directory. The public launch entry
 is `ctmux.app` on macOS, `ctmux.AppImage` on Linux, or `ctmux.lnk` on Windows.

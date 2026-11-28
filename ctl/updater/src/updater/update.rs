@@ -1,4 +1,4 @@
-use super::{TargetOptions, arguments::InstallArguments};
+use super::{TargetOptions, arguments::InstallArguments, sign::SigningMode};
 use ctl_client::component_update::{
   BuildSource, BundleChannel, Package, PreparationPhase, PreparationProgress, PreparedUpdate,
   UpdateResult,
@@ -12,6 +12,16 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+mod macos_signing;
+
+#[derive(Clone, Copy, Default)]
+struct SigningRequest {
+  mode: Option<SigningMode>,
+  #[cfg(target_os = "macos")]
+  interactive: bool,
+}
 
 #[derive(Serialize)]
 struct HostResult {
@@ -171,6 +181,11 @@ pub(super) async fn install(
       source: &source,
       pr: pr_builds.as_mut(),
     }),
+    SigningRequest {
+      mode: options.signing.mode(),
+      #[cfg(target_os = "macos")]
+      interactive: !options.json,
+    },
     options.json,
   )
   .await
@@ -180,6 +195,7 @@ pub(super) async fn run(
   home: &Path,
   targets: &[TargetOptions<'_>],
   check: bool,
+  mode: Option<SigningMode>,
   json: bool,
 ) -> io::Result<()> {
   let operation = if check {
@@ -187,7 +203,18 @@ pub(super) async fn run(
   } else {
     Operation::Update
   };
-  run_batch(home, targets, operation, json).await
+  run_batch(
+    home,
+    targets,
+    operation,
+    SigningRequest {
+      mode,
+      #[cfg(target_os = "macos")]
+      interactive: !json,
+    },
+    json,
+  )
+  .await
 }
 
 pub(super) async fn run_development(
@@ -200,6 +227,7 @@ pub(super) async fn run_development(
     home,
     targets,
     Operation::Install(InstallSource::Checkout { workspace }),
+    SigningRequest::default(),
     json,
   )
   .await
@@ -209,6 +237,7 @@ async fn run_batch(
   home: &Path,
   targets: &[TargetOptions<'_>],
   mut operation: Operation<'_>,
+  signing: SigningRequest,
   json: bool,
 ) -> io::Result<()> {
   if targets.iter().any(TargetOptions::remote) {
@@ -216,7 +245,7 @@ async fn run_batch(
   }
   let mut results = Vec::new();
   for &target in targets {
-    results.push(run_host(home, target, &mut operation).await?);
+    results.push(run_host(home, target, &mut operation, signing).await?);
   }
   if json {
     super::print_json(&results)?;
@@ -239,6 +268,7 @@ async fn run_host(
   home: &Path,
   target: TargetOptions<'_>,
   operation: &mut Operation<'_>,
+  signing: SigningRequest,
 ) -> io::Result<HostResult> {
   let label = target.label();
   let action = match operation {
@@ -249,7 +279,7 @@ async fn run_host(
   };
   eprintln!("ctlup: {action} {label}…");
   let outcome = tokio::select! {
-    result = update_host(home, target, operation) => result,
+    result = update_host(home, target, operation, signing) => result,
     _ = tokio::signal::ctrl_c() => return Err(io::Error::new(io::ErrorKind::Interrupted, "Operation cancelled. Check status before retrying.")),
   };
   let mut response = HostResult {
@@ -317,6 +347,7 @@ async fn update_host(
   home: &Path,
   selection: TargetOptions<'_>,
   operation: &mut Operation<'_>,
+  signing: SigningRequest,
 ) -> io::Result<Outcome> {
   // Capture local source heads before resolving SSH, so preparation still
   // rejects a newer installation made while the connection was in flight.
@@ -335,12 +366,22 @@ async fn update_host(
   }
   let snapshot = snapshot.expect("install and update capture a source snapshot");
   if let Operation::Install(source) = operation {
-    return install_selected(home, &endpoint, source, &snapshot, None)
+    return install_selected(home, &endpoint, source, &snapshot, None, signing)
       .await
       .map(Outcome::Installed);
   }
 
   let tracked = endpoint.runtime_source(home).await?;
+  let signing_explicit = signing.mode.is_some();
+  #[cfg(target_os = "macos")]
+  let signing = if endpoint.remote.is_none() && !signing_explicit {
+    SigningRequest {
+      mode: macos_signing::recorded_mode(home, &tracked)?,
+      ..signing
+    }
+  } else {
+    signing
+  };
   let result = if let Some(channel) = super::tracked_channel(tracked.origin.as_ref()) {
     let source = BuildSource::Published { channel };
     install_selected(
@@ -352,10 +393,11 @@ async fn update_host(
       },
       &snapshot,
       None,
+      signing,
     )
     .await?
-  } else if tracked.missing {
-    restore_pinned(home, &endpoint, tracked, &snapshot).await?
+  } else if tracked.missing || (signing_explicit && tracked.active.is_some()) {
+    restore_pinned(home, &endpoint, tracked, &snapshot, signing).await?
   } else if tracked.active.is_some() {
     return check(&tracked).await.map(Outcome::Checked);
   } else {
@@ -411,6 +453,7 @@ async fn restore_pinned(
   endpoint: &Endpoint,
   tracked: RuntimeSource,
   snapshot: &ctl_client::component_update::PreparationSnapshot,
+  signing: SigningRequest,
 ) -> io::Result<UpdateResult> {
   let Some(active) = tracked.active else {
     return Err(io::Error::other(
@@ -444,6 +487,7 @@ async fn restore_pinned(
     },
     snapshot,
     Some((&active, origin)),
+    signing,
   )
   .await
 }
@@ -454,6 +498,7 @@ async fn install_selected(
   source: &mut InstallSource<'_>,
   snapshot: &ctl_client::component_update::PreparationSnapshot,
   restore: Option<(&str, CatalogOrigin)>,
+  signing: SigningRequest,
 ) -> io::Result<UpdateResult> {
   let last_download = Mutex::new(None);
   let report = |progress| report_preparation(&progress, &last_download);
@@ -484,6 +529,12 @@ async fn install_selected(
   }
   let package = Package::FullBundle;
   let Some(remote) = &endpoint.remote else {
+    #[cfg(target_os = "macos")]
+    if !matches!(source, InstallSource::Checkout { .. }) {
+      return macos_signing::install(home, prepared, signing).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = signing;
     return ctl_client::component_update::install_prepared_local(home, prepared, package).await;
   };
   let result = install_with_progress(remote, &prepared, package).await?;

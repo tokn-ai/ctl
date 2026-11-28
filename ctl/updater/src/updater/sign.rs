@@ -1,4 +1,5 @@
 use super::arguments::SignArguments;
+use serde::{Deserialize, Serialize};
 use std::{io, path::Path};
 
 #[cfg(target_os = "macos")]
@@ -8,9 +9,25 @@ mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+mod provisioning;
+#[cfg(target_os = "macos")]
 use macos::Runner;
 #[cfg(target_os = "macos")]
-pub(super) use macos::{export_desktop, sign_for_install};
+pub(super) use macos::{
+  export_desktop, sign_ad_hoc_executable, sign_for_install, sign_runtime_helper,
+};
+#[cfg(target_os = "macos")]
+pub(super) use provisioning::verify_embedded_profile;
+
+/// Local macOS signing policy. The default is required for distribution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum SigningMode {
+  #[default]
+  DeveloperId,
+  Provision,
+  AdHoc,
+}
 
 /// A locally available desktop archive with a verified build identity.
 #[cfg(target_os = "macos")]

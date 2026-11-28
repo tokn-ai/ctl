@@ -297,7 +297,22 @@ impl Installations {
     build: &ComponentBuildInfo,
     origin: Option<&CatalogOrigin>,
   ) -> io::Result<()> {
-    filesystem::install_manager(self, updater, build, origin)
+    filesystem::install_manager(self, updater, build, origin, false)
+  }
+
+  /// Selects a verified macOS updater and refreshes the stable launcher to use
+  /// the same helper resolution logic for runtimes from earlier publications.
+  ///
+  /// # Errors
+  /// Reports unsafe storage, damaged aliases or collisions with other commands.
+  #[cfg(target_os = "macos")]
+  pub fn install_manager_and_refresh_launcher(
+    &self,
+    updater: &[u8],
+    build: &ComponentBuildInfo,
+    origin: Option<&CatalogOrigin>,
+  ) -> io::Result<()> {
+    filesystem::install_manager(self, updater, build, origin, true)
   }
 
   /// Reads retained updater bytes after verifying their exact digest.

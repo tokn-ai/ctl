@@ -1375,6 +1375,7 @@ dependencies = [
 name = "ctlup"
 version = "0.1.5"
 dependencies = [
+ "base64 0.23.1",
  "clap",
  "ctl-bundle",
  "ctl-client",
@@ -1389,6 +1390,7 @@ dependencies = [
  "hex",
  "libproc",
  "lnks",
+ "plist",
  "rustix 1.1.6",
  "serde",
  "serde_json",

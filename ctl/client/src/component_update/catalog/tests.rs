@@ -60,6 +60,10 @@ fn prepared(home: &Home, target: &str, revision: char, publication: &str) -> Pre
     updater_info: Some(info),
     remote_archive: None,
     snapshot,
+    #[cfg(target_os = "macos")]
+    authorized_ad_hoc_bundle: None,
+    #[cfg(target_os = "macos")]
+    require_runtime_signing: false,
   }
 }
 
@@ -322,6 +326,10 @@ async fn offline_source_keeps_its_verified_updater_when_the_import_cache_is_evic
     source,
     snapshot,
     remote_archive: None,
+    #[cfg(target_os = "macos")]
+    authorized_ad_hoc_bundle: None,
+    #[cfg(target_os = "macos")]
+    require_runtime_signing: false,
   };
   install_prepared_components(&home.0, vec![component], None, false)
     .await

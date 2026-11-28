@@ -17,12 +17,16 @@ On macOS, run `ctlup sign` from a ctl checkout to renew the active development
 runtime's `ctld` signature. Use `ctlup sign --channel nightly` or
 `ctlup sign --version BUILD_ID` to sign a retained desktop archive from the
 local cache. Install the desired desktop first, for example with
-`ctlup install app --channel nightly`. Without an active local development
-runtime, bare `ctlup sign` selects the active cached desktop. Signing reuses the
-cached build and contacts Apple for notarization. Desktop installs and updates
-automatically sign unsigned macOS packages when the required Apple credentials
-and Developer ID identity are available. Otherwise they continue unsigned with
-a message.
+`ctlup install app --channel nightly --ad-hoc`. Without an active local
+development runtime, bare `ctlup sign` selects the active cached desktop.
+
+On macOS, `install` and `update` verify published signatures and sign unsigned
+builds with Developer ID by default. Pass `--provision` to use an Apple
+Development identity and a matching Xcode profile. `ctlup` remembers the chosen
+Apple Team for future signing. Pass `--ad-hoc` to install without Apple
+credentials. An ad hoc `ctld` cannot use the protected Keychain or Touch ID.
+Updates reuse the installation's signing mode. `ctlup sign` accepts the same
+flags for a cached desktop build.
 [Release signing guide](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 Use `ctlup ctream install` and `ctlup ctream run` for the separate ctream

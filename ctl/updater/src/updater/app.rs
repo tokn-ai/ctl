@@ -1,3 +1,4 @@
+use super::sign::SigningMode;
 use ctl_client::cli::Channel;
 use ctl_client::remote_bundle::desktop::{self, DesktopRelease, DesktopSigning, DesktopTarget};
 use ctl_client::remote_bundle::published;
@@ -36,6 +37,7 @@ pub(super) async fn install(
   release: Option<&str>,
   pr: Option<u64>,
   from: Option<&Path>,
+  signing: Option<SigningMode>,
   json: bool,
 ) -> io::Result<()> {
   let work = activation::Workspace::begin(home)?;
@@ -76,10 +78,16 @@ pub(super) async fn install(
       },
     )
   };
+  let package = prepare_signing(home, &work, package, signing.unwrap_or_default(), !json).await?;
   activate(&work, current.as_ref(), &package, source, json)
 }
 
-pub(super) async fn update(home: &Path, check: bool, json: bool) -> io::Result<()> {
+pub(super) async fn update(
+  home: &Path,
+  check: bool,
+  signing: Option<SigningMode>,
+  json: bool,
+) -> io::Result<()> {
   let installations = Installations::new(home);
   let Some(selected) = installations.desktop_selection()? else {
     if check {
@@ -90,43 +98,45 @@ pub(super) async fn update(home: &Path, check: bool, json: bool) -> io::Result<(
       "Run ctlup install app to install ctmux.",
     ));
   };
+  let work = (!check)
+    .then(|| activation::Workspace::begin(home))
+    .transpose()?;
+  if let Some(work) = &work
+    && work.installations().desktop_selection()?.as_ref() != Some(&selected)
+  {
+    return Err(invalid(
+      "the desktop selection changed; retry the operation",
+    ));
+  }
+  let installed = app_status(home, Some(selected.clone()))?;
+  let mode = signing.or(installed.signing_mode).unwrap_or_default();
   let DesktopSource::Channel { channel } = &selected.source else {
-    let installed = app_status(home, Some(selected.clone()))?;
-    #[cfg(target_os = "macos")]
-    if !check && !installed.missing && installed.signing == Some(Signing::Unsigned) {
-      let work = activation::Workspace::begin(home)?;
-      let digest = Digest::parse(&selected.content_id)?;
-      if let Some(package) = work.cached(&digest)? {
-        let signed = sign_if_unsigned(&work, package).await?;
-        if signed.metadata.signing == Signing::Signed {
-          return activate(
-            &work,
-            Some(&selected),
-            &signed,
-            selected.source.clone(),
-            json,
-          );
-        }
-      }
+    if let Some(work) = &work
+      && (installed.missing
+        || signing.is_some()
+        || matches!(
+          installed.signing,
+          Some(Signing::Unsigned | Signing::Provisioned)
+        ))
+    {
+      return ensure_selected(home, work, &selected, mode, json).await;
     }
-    if check || !installed.missing {
-      let state = if installed.missing {
-        CheckState::Missing
-      } else {
-        CheckState::Pinned
-      };
-      return report_inactive_check(installed, state, json);
-    }
-    return ensure_selected(&activation::Workspace::begin(home)?, &selected, json).await;
+    let state = if installed.missing {
+      CheckState::Missing
+    } else {
+      CheckState::Pinned
+    };
+    return report_inactive_check(installed, state, json);
   };
   let channel = parse_channel(channel)?;
   let target = DesktopTarget::native()?;
   if check {
     return check_updates(home, selected, target, channel, json).await;
   }
-  let work = activation::Workspace::begin(home)?;
+  let work = work.expect("updating acquires a desktop workspace");
   let release = desktop::latest(channel, target, work.staging()).await?;
   let package = prepare_published(&work, release, target, Some(channel)).await?;
+  let package = prepare_signing(home, &work, package, mode, !json).await?;
   let source = selected.source.clone();
   activate(&work, Some(&selected), &package, source, json)
 }
@@ -204,8 +214,10 @@ pub(super) async fn install_development(
 }
 
 async fn ensure_selected(
+  home: &Path,
   work: &activation::Workspace,
   selected: &DesktopSelection,
+  mode: SigningMode,
   json: bool,
 ) -> io::Result<()> {
   let digest = Digest::parse(&selected.content_id)?;
@@ -235,7 +247,12 @@ async fn ensure_selected(
       json,
     );
   };
-  let package = sign_if_unsigned(work, cached).await?;
+  let package = if cached.metadata.signing == Signing::Provided && mode == SigningMode::DeveloperId
+  {
+    cached
+  } else {
+    prepare_signing(home, work, cached, mode, !json).await?
+  };
   activate(
     work,
     Some(selected),
@@ -355,9 +372,10 @@ struct AppStatus {
   content_id: Option<String>,
   #[serde(skip)]
   source_content_id: Option<String>,
-  #[cfg(target_os = "macos")]
-  #[serde(skip)]
+  #[serde(skip_serializing_if = "Option::is_none")]
   signing: Option<Signing>,
+  #[serde(skip)]
+  signing_mode: Option<SigningMode>,
   bundle_id: Option<String>,
   publication_id: Option<String>,
   source: Option<DesktopSource>,
@@ -372,8 +390,8 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
     return Ok(AppStatus {
       content_id: None,
       source_content_id: None,
-      #[cfg(target_os = "macos")]
       signing: None,
+      signing_mode: None,
       bundle_id: None,
       publication_id: None,
       source: None,
@@ -399,16 +417,18 @@ fn app_status(home: &Path, selected: Option<DesktopSelection>) -> io::Result<App
     .as_ref()
     .and_then(|metadata| metadata.signed_from.as_ref())
     .map_or_else(|| selected.content_id.clone(), |digest| digest.0.clone());
-  #[cfg(target_os = "macos")]
-  let signing = metadata.as_ref().map(|metadata| metadata.signing);
+  let signing = metadata
+    .as_ref()
+    .and_then(|metadata| cfg!(target_os = "macos").then_some(metadata.signing));
+  let signing_mode = metadata.as_ref().and_then(|metadata| metadata.signing_mode);
   let (bundle_id, publication_id) = metadata
     .map(|metadata| (metadata.bundle_id, metadata.publication_id))
     .unwrap_or_default();
   Ok(AppStatus {
     content_id: Some(selected.content_id),
     source_content_id: Some(source_content_id),
-    #[cfg(target_os = "macos")]
     signing,
+    signing_mode,
     bundle_id,
     publication_id,
     source: Some(selected.source),
@@ -431,6 +451,14 @@ fn report_status(status: AppStatus, json: bool) -> io::Result<()> {
     println!("ctmux {build} (missing)");
   } else {
     println!("ctmux {build} at {}.", status.launch_entry.display());
+  }
+  #[cfg(target_os = "macos")]
+  match status.signing {
+    Some(Signing::Provisioned) => println!("Signing: provisioned for this Mac."),
+    Some(Signing::AdHoc) => println!("Signing: ad hoc."),
+    Some(Signing::Signed) => println!("Signing: notarized Developer ID."),
+    Some(Signing::Unsigned) => println!("Signing: unsigned."),
+    _ => {}
   }
   if let Some(source) = status.source {
     match source {
@@ -476,6 +504,8 @@ struct DesktopMetadata {
   target_triple: String,
   signing: Signing,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  signing_mode: Option<SigningMode>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   provenance: Option<DesktopProvenance>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   signed_from: Option<Digest>,
@@ -500,6 +530,7 @@ impl DesktopMetadata {
       publication_id: None,
       target_triple: target.triple().to_owned(),
       signing: Signing::Provided,
+      signing_mode: None,
       provenance: None,
       signed_from: None,
     }
@@ -521,7 +552,10 @@ impl DesktopMetadata {
     if let Some(source) = &self.signed_from
       && (Digest::parse(source.as_str()).is_err()
         || source == digest
-        || !matches!(self.signing, Signing::Signed))
+        || !matches!(
+          self.signing,
+          Signing::Signed | Signing::Provisioned | Signing::AdHoc
+        ))
     {
       return Err(invalid(
         "invalid unsigned source for the signed desktop package",
@@ -536,6 +570,8 @@ impl DesktopMetadata {
 enum Signing {
   Signed,
   Unsigned,
+  Provisioned,
+  AdHoc,
   NotApplicable,
   Provided,
 }
@@ -649,16 +685,19 @@ async fn prepare_published(
       ..DesktopMetadata::provided(target)
     },
   };
-  sign_if_unsigned(work, package).await
+  Ok(package)
 }
 
 #[cfg(target_os = "macos")]
-use signing::sign_if_unsigned;
+use signing::prepare_signing;
 
 #[cfg(not(target_os = "macos"))]
-fn sign_if_unsigned(
+fn prepare_signing(
+  _: &Path,
   _: &activation::Workspace,
   package: CachedPackage,
+  _: SigningMode,
+  _: bool,
 ) -> std::future::Ready<io::Result<CachedPackage>> {
   std::future::ready(Ok(package))
 }
@@ -699,6 +738,19 @@ fn prepare_payload(staging: &Path, package: &CachedPackage) -> io::Result<Deskto
           DesktopSigning::Signed
         } else {
           DesktopSigning::Unsigned
+        },
+      )?,
+      Signing::Provisioned | Signing::AdHoc => macos::stage_local(
+        &package.archive,
+        staging,
+        metadata
+          .app_version
+          .as_deref()
+          .ok_or_else(|| invalid("desktop metadata has no version"))?,
+        if metadata.signing == Signing::Provisioned {
+          SigningMode::Provision
+        } else {
+          SigningMode::AdHoc
         },
       )?,
       Signing::NotApplicable => return Err(invalid("macOS desktop package has no signing mode")),
@@ -844,6 +896,11 @@ fn report_activation(
     Action::Installed => println!("Installed ctmux {build} at {destination}."),
     Action::Updated => println!("Updated ctmux {build} at {destination}."),
     Action::AlreadyInstalled => println!("ctmux {build} is already installed at {destination}."),
+  }
+  if metadata.signing == Signing::AdHoc {
+    println!(
+      "Ad hoc signing is for this Mac. An ad hoc ctld cannot access saved credentials or use Touch ID approval."
+    );
   }
   Ok(())
 }

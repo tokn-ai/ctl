@@ -1,4 +1,4 @@
-use super::{DesktopInput, SignArguments, helper, input};
+use super::{DesktopInput, SignArguments, SigningMode, helper, input, provisioning};
 use ctl_client::remote_bundle::desktop::{DesktopSigning, DesktopTarget};
 use ctl_core::bundles::Source;
 use ctl_core::installations::Installations;
@@ -17,6 +17,8 @@ use tokio::sync::watch;
 
 const APP_IDENTIFIER: &str = "dev.tokn-ai.ctl.ctmux";
 const APP_NAME: &str = "ctmux.app";
+const HELPER_APP: &str = "Contents/Helpers/ctld.app";
+const HELPER_EXECUTABLE: &str = "Contents/MacOS/ctld";
 const SIDECARS: &[&str] = &["ctmuxd", "ctl-taskd"];
 const SIGNING_CONFIGURATION: &[&str] = &[
   "CTLD_PROVISIONING_PROFILE",
@@ -40,7 +42,10 @@ impl Runner {
     let _ = self.0.clone().wait_for(|stop| *stop).await;
   }
 
-  async fn cancellable<T>(&self, operation: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+  pub(super) async fn cancellable<T>(
+    &self,
+    operation: impl Future<Output = io::Result<T>>,
+  ) -> io::Result<T> {
     self.check()?;
     tokio::select! {
       result = operation => result,
@@ -123,6 +128,15 @@ impl SigningCredentials {
       .iter()
       .all(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
   }
+}
+
+async fn developer_id_credentials(runner: &Runner) -> io::Result<SigningCredentials> {
+  if !SigningCredentials::is_configured() || !developer_id_available(runner).await? {
+    return Err(io::Error::other(
+      "An unsigned macOS build requires a Developer ID Application identity, its ctld provisioning profile, and notarization credentials. Use --provision for Xcode development signing or --ad-hoc to install without an Apple account.",
+    ));
+  }
+  SigningCredentials::load()
 }
 
 async fn developer_id_available(runner: &Runner) -> io::Result<bool> {
@@ -266,21 +280,22 @@ async fn sign_app(runner: &Runner, app: &Path, identity: &str) -> io::Result<()>
     .iter()
     .map(|name| app.join("Contents/MacOS").join(name));
   for item in sidecars.chain(std::iter::once(app.to_owned())) {
-    runner
-      .output(
-        Command::new("/usr/bin/codesign")
-          .args([
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp",
-            "--sign",
-            identity,
-          ])
-          .arg(item),
-      )
-      .await?;
+    sign_code(runner, &item, identity).await?;
   }
+  Ok(())
+}
+
+async fn sign_code(runner: &Runner, path: &Path, identity: &str) -> io::Result<()> {
+  let mut command = Command::new("/usr/bin/codesign");
+  command.arg("--force");
+  if identity == "-" {
+    command.arg("--timestamp=none");
+  } else {
+    command.args(["--options", "runtime", "--timestamp"]);
+  }
+  runner
+    .output(command.args(["--sign", identity]).arg(path))
+    .await?;
   Ok(())
 }
 
@@ -442,15 +457,7 @@ async fn stage_signed_app(
   stage: &Path,
   arch: &str,
 ) -> io::Result<(PathBuf, String)> {
-  let unpacked = stage.join("bundle");
-  private_fs::create_directory(&unpacked)?;
-  let app = tokio::task::spawn_blocking({
-    let archive = archive.to_owned();
-    let version = app_version.to_owned();
-    move || input::prepare(&archive, &unpacked, &version)
-  })
-  .await
-  .map_err(io::Error::other)??;
+  let app = stage_input(archive, app_version, stage).await?;
   for executable in [
     "Contents/MacOS/ctmux-app",
     "Contents/MacOS/ctmuxd",
@@ -465,21 +472,51 @@ async fn stage_signed_app(
       )
       .await?;
   }
-  let identity = helper::sign(&app, stage, app_version, &credentials.profile, runner).await?;
+  let helper_app = app.join(HELPER_APP);
+  let identity = helper::sign(
+    &helper_app.join(HELPER_EXECUTABLE),
+    &helper_app,
+    stage,
+    app_version,
+    helper::Identity::DeveloperId(&credentials.profile),
+    runner,
+  )
+  .await?;
   sign_app(runner, &app, &identity).await?;
-  let submission = stage.join("ctmux.zip");
+  notarize_app(runner, &app, stage, credentials).await?;
+  verify_app(runner, &app, arch).await?;
+  Ok((app, identity))
+}
+
+async fn stage_input(archive: &Path, app_version: &str, stage: &Path) -> io::Result<PathBuf> {
+  let unpacked = stage.join("bundle");
+  private_fs::create_directory(&unpacked)?;
+  tokio::task::spawn_blocking({
+    let archive = archive.to_owned();
+    let version = app_version.to_owned();
+    move || input::prepare(&archive, &unpacked, &version)
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+async fn notarize_app(
+  runner: &Runner,
+  app: &Path,
+  stage: &Path,
+  credentials: &SigningCredentials,
+) -> io::Result<()> {
+  let submission = stage.join("notarization.zip");
   runner
     .output(
       Command::new("/usr/bin/ditto")
         .args(["-c", "-k", "--keepParent"])
-        .arg(&app)
+        .arg(app)
         .arg(&submission),
     )
     .await?;
-  notarize(runner, &submission, &app, credentials).await?;
-  verify_app(runner, &app, arch).await?;
-  fs::remove_file(submission)?;
-  Ok((app, identity))
+  notarize(runner, &submission, app, credentials).await?;
+  fs::remove_file(submission)
 }
 
 async fn pack_archive(
@@ -488,7 +525,8 @@ async fn pack_archive(
   stage: &Path,
   archive: &Path,
   version: &str,
-  arch: &str,
+  arch: &'static str,
+  mode: SigningMode,
 ) -> io::Result<()> {
   runner
     .output(
@@ -509,20 +547,32 @@ async fn pack_archive(
     let version = version.to_owned();
     let archive = archive.to_owned();
     move || {
-      crate::updater::app::macos::stage(&archive, &transported, &version, DesktopSigning::Unsigned)
+      let app = crate::updater::app::macos::stage(
+        &archive,
+        &transported,
+        &version,
+        DesktopSigning::Unsigned,
+      )?;
+      if mode != SigningMode::DeveloperId {
+        crate::updater::app::macos::verify_local_signature(&app, mode, arch)?;
+      }
+      Ok::<_, io::Error>(app)
     }
   })
   .await
   .map_err(io::Error::other)??;
-  validate_ticket(runner, &transported_app).await?;
-  verify_app(runner, &transported_app, arch).await
+  if mode == SigningMode::DeveloperId {
+    validate_ticket(runner, &transported_app).await?;
+    verify_app(runner, &transported_app, arch).await?;
+  }
+  Ok(())
 }
 
 async fn finish_signing(
   runner: &Runner,
   home: &Path,
   package: DesktopInput<'_>,
-  arch: &str,
+  arch: &'static str,
   credentials: &SigningCredentials,
   json: bool,
 ) -> io::Result<()> {
@@ -565,6 +615,7 @@ async fn finish_signing(
     &assets.join(&archive_name),
     package.app_version,
     arch,
+    SigningMode::DeveloperId,
   )
   .await?;
 
@@ -663,39 +714,57 @@ pub(in crate::updater) async fn export_desktop(
   json: bool,
 ) -> io::Result<()> {
   let arch = signing_architecture(package)?;
-  let credentials = SigningCredentials::load()?;
   with_signing_signals(async |runner| {
+    let credentials = developer_id_credentials(runner).await?;
     finish_signing(runner, home, package, arch, &credentials, json).await
   })
   .await
 }
 
 pub(in crate::updater) async fn sign_for_install(
+  home: &Path,
   archive: &Path,
   app_version: &str,
   target: DesktopTarget,
   staging: &Path,
-) -> io::Result<Option<PathBuf>> {
-  if !SigningCredentials::is_configured() {
-    return Ok(None);
-  }
+  mode: SigningMode,
+  interactive: bool,
+) -> io::Result<PathBuf> {
   validate_build_name(app_version)?;
   let arch = target_architecture(target)?;
   with_signing_signals(async |runner| {
-    if !developer_id_available(runner).await? {
-      return Ok(None);
-    }
-    let credentials = SigningCredentials::load()?;
     let mut scratch = Scratch::allocate(&staging.join("signed-app"))?;
-    let (app, _) = stage_signed_app(
-      runner,
-      archive,
-      app_version,
-      &credentials,
-      &scratch.stage,
-      arch,
-    )
-    .await?;
+    let stage = &scratch.stage;
+    let app = if mode == SigningMode::DeveloperId {
+      let credentials = developer_id_credentials(runner).await?;
+      stage_signed_app(runner, archive, app_version, &credentials, stage, arch)
+        .await?
+        .0
+    } else {
+      let app = stage_input(archive, app_version, stage).await?;
+      let profile = match mode {
+        SigningMode::Provision => {
+          Some(provisioning::profile(runner, home, stage, None, interactive).await?)
+        }
+        _ => None,
+      };
+      let identity = match &profile {
+        Some(profile) => helper::Identity::Development(&profile.path),
+        None => helper::Identity::AdHoc,
+      };
+      let helper_app = app.join(HELPER_APP);
+      helper::sign(
+        &helper_app.join(HELPER_EXECUTABLE),
+        &helper_app,
+        stage,
+        app_version,
+        identity,
+        runner,
+      )
+      .await?;
+      sign_app(runner, &app, "-").await?;
+      app
+    };
     let assets = scratch.stage.join("assets");
     private_fs::create_directory(&assets)?;
     let name = "app.tar.gz";
@@ -706,13 +775,86 @@ pub(in crate::updater) async fn sign_for_install(
       &assets.join(name),
       app_version,
       arch,
+      mode,
     )
     .await?;
     runner.check()?;
     scratch.finish(&assets)?;
-    Ok(Some(scratch.output.join(name)))
+    Ok(scratch.output.join(name))
   })
   .await
+}
+
+pub(in crate::updater) async fn sign_runtime_helper(
+  home: &Path,
+  binary: &Path,
+  output_app: &Path,
+  version: &str,
+  mode: SigningMode,
+  interactive: bool,
+) -> io::Result<String> {
+  validate_build_name(version)?;
+  let stage = output_app.parent().ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "ctld.app has no staging directory",
+    )
+  })?;
+  with_signing_signals(async |runner| match mode {
+    SigningMode::DeveloperId => {
+      let credentials = developer_id_credentials(runner).await?;
+      helper::sign(
+        binary,
+        output_app,
+        stage,
+        version,
+        helper::Identity::DeveloperId(&credentials.profile),
+        runner,
+      )
+      .await?;
+      notarize_app(runner, output_app, stage, &credentials).await?;
+      let details = runner
+        .output(
+          Command::new("/usr/bin/codesign")
+            .args(["--display", "--verbose=2"])
+            .arg(output_app),
+        )
+        .await?;
+      String::from_utf8_lossy(&details.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .filter(|team| {
+          team.len() == 10
+            && team
+              .bytes()
+              .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("ctld signing did not report an Apple Team ID"))
+    }
+    SigningMode::Provision => {
+      let profile = provisioning::profile(runner, home, stage, None, interactive).await?;
+      helper::sign(
+        binary,
+        output_app,
+        stage,
+        version,
+        helper::Identity::Development(&profile.path),
+        runner,
+      )
+      .await?;
+      Ok(profile.team)
+    }
+    SigningMode::AdHoc => Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Ad hoc runtime signing expects a standalone executable.",
+    )),
+  })
+  .await
+}
+
+pub(in crate::updater) async fn sign_ad_hoc_executable(binary: &Path) -> io::Result<()> {
+  with_signing_signals(async |runner| sign_code(runner, binary, "-").await).await
 }
 
 async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) -> io::Result<()> {
@@ -731,7 +873,9 @@ async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) 
 }
 
 pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
-  let implicit_development = options.channel.is_none()
+  let mode = options.signing.mode();
+  let implicit_development = mode.is_none()
+    && options.channel.is_none()
     && options.version.is_none()
     && options.workspace.is_none()
     && Installations::new(home)
@@ -763,7 +907,7 @@ pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
       ));
     }
   };
-  crate::updater::app::sign_cached(home, options.channel, version, target, options.json).await
+  crate::updater::app::sign_cached(home, options.channel, version, target, mode, options.json).await
 }
 
 async fn with_signing_signals<T>(

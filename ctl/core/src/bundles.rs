@@ -23,6 +23,45 @@ pub use cache::PruneCacheResult;
 pub use crate::bundle_layout::SERVICES as COMPONENTS;
 pub use crate::bundle_layout::{MAX_FILE_BYTES, MAX_MANIFEST_BYTES, MAX_TOTAL_BYTES};
 pub const MANIFEST_FILE: &str = "bundle.json";
+pub const MACOS_RUNTIME_SIGNING_FIELD: &str = "local_macos_signing";
+pub const LEGACY_MANIFEST_FILE: &str = "manifest.json";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LocalMacosSigning {
+  AdHoc,
+}
+
+/// Reads the explicit ad hoc receipt in a managed runtime's legacy manifest.
+///
+/// # Errors
+/// Rejects malformed legacy metadata or an unrecognized signing value.
+pub fn macos_ad_hoc_receipt(files: &BTreeMap<String, Vec<u8>>) -> io::Result<bool> {
+  files
+    .get(LEGACY_MANIFEST_FILE)
+    .map_or(Ok(false), |bytes| parse_macos_ad_hoc_receipt(bytes))
+}
+
+fn parse_macos_ad_hoc_receipt(bytes: &[u8]) -> io::Result<bool> {
+  #[derive(Deserialize)]
+  struct LegacyManifest {
+    #[serde(default, deserialize_with = "local_macos_signing")]
+    local_macos_signing: Option<LocalMacosSigning>,
+  }
+
+  fn local_macos_signing<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+  ) -> Result<Option<LocalMacosSigning>, D::Error> {
+    LocalMacosSigning::deserialize(deserializer).map(Some)
+  }
+
+  if bytes.len() > MAX_MANIFEST_BYTES {
+    return Err(invalid("legacy runtime manifest exceeds its size limit"));
+  }
+  serde_json::from_slice::<LegacyManifest>(bytes)
+    .map(|manifest| manifest.local_macos_signing.is_some())
+    .map_err(io::Error::other)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -348,6 +387,38 @@ impl Bundle {
     filesystem::payload(self)
   }
 
+  /// Checks the bundle-bound ad hoc receipt without re-reading its executables.
+  ///
+  /// # Errors
+  /// Rejects modified metadata or contradictory helper signing records.
+  pub fn macos_ad_hoc_helper(&self) -> io::Result<bool> {
+    let Some(metadata) = self.manifest.files.get(LEGACY_MANIFEST_FILE) else {
+      return Ok(false);
+    };
+    let bytes = filesystem::read(
+      &self.directory.join(LEGACY_MANIFEST_FILE),
+      MAX_MANIFEST_BYTES,
+    )?;
+    if digest(&bytes) != metadata.sha256 {
+      return Err(invalid(
+        "legacy runtime manifest failed checksum verification",
+      ));
+    }
+    let ad_hoc = parse_macos_ad_hoc_receipt(&bytes)?;
+    if ad_hoc
+      && self
+        .manifest
+        .files
+        .keys()
+        .any(|name| name == "ctld-package.json" || name.starts_with("ctld.app/"))
+    {
+      return Err(invalid(
+        "ad hoc runtime contains a conflicting signed helper",
+      ));
+    }
+    Ok(ad_hoc)
+  }
+
   #[must_use]
   pub fn executable(&self, component: &str) -> Option<PathBuf> {
     self.manifest.components.contains_key(component).then(|| {
@@ -534,7 +605,9 @@ pub fn selected_executable_at(
   let Some(bundle) = crate::installations::Installations::new(home).active()? else {
     return Ok(None);
   };
+  let mut use_helper_app = false;
   if component == "ctld" && cfg!(target_os = "macos") {
+    let ad_hoc = bundle.macos_ad_hoc_helper()?;
     let receipt = bundle.manifest.files.contains_key("ctld-package.json");
     let has_app = bundle
       .manifest
@@ -545,16 +618,17 @@ pub fn selected_executable_at(
       .manifest
       .files
       .contains_key("ctld.app/Contents/MacOS/ctld");
-    if !receipt && !has_app {
+    if !ad_hoc && !receipt && !has_app {
       // A flat SSH package makes no claim to replace the signed local helper,
       // including when its remote broker contracts differ from this client.
       return Ok(None);
     }
-    if !receipt || !app {
+    if !ad_hoc && (!receipt || !app) {
       return Err(invalid(
         "signed helper requires its complete app package and receipt",
       ));
     }
+    use_helper_app = !ad_hoc;
   }
   let info = bundle
     .manifest
@@ -571,7 +645,7 @@ pub fn selected_executable_at(
       "selected bundle is incompatible; explicitly sync a compatible complete build",
     ));
   }
-  if component == "ctld" && cfg!(target_os = "macos") {
+  if use_helper_app {
     return Ok(Some(bundle.directory.join("ctld.app/Contents/MacOS/ctld")));
   }
   Ok(bundle.executable(component))
@@ -649,7 +723,7 @@ fn safe_file(name: &str, layout: Layout, target: &str) -> bool {
     .names()
     .iter()
     .any(|component| executable_name(target, component) == name)
-    || name == "manifest.json"
+    || name == LEGACY_MANIFEST_FILE
     || macos_package)
     && name.len() <= 512
     && name.split('/').all(safe_path_component)

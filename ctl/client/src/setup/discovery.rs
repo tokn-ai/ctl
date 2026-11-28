@@ -67,6 +67,16 @@ pub(super) async fn inspect_selected_bundle(
   let target = macos::release_target()?;
   if let Some(bundle) = ctl_core::installations::Installations::new(home).active()? {
     let files = bundle.read_files()?;
+    if ctl_core::bundles::macos_ad_hoc_receipt(&files)? {
+      let info = crate::components::macos_runtime::verify_ad_hoc(&bundle, &files).await?;
+      ensure_compatible_selection(&info, required)?;
+      return Ok(Some(super::HelperSelection {
+        executable: bundle.directory.join("ctld"),
+        info: Some(info),
+        archive_sha256: None,
+        installed: true,
+      }));
+    }
     let Some(receipt) = files.get("ctld-package.json") else {
       // Flat remote packages serve SSH peers; they do not replace the account's
       // separately provisioned signed macOS helper. A packaged app, when present,
@@ -79,18 +89,12 @@ pub(super) async fn inspect_selected_bundle(
       return Ok(None);
     };
     let info = super::inspect_ctld_package(home, &bundle.directory, receipt).await?;
-    if !compatible(&info) || !bundle.manifest.same_component("ctld", &info) {
+    if !bundle.manifest.same_component("ctld", &info) {
       return Err(Error::Verification(
         "selected bundle helper is incompatible or differs from its manifest".into(),
       ));
     }
-    if let Some(required) = required
-      && !compatible_for_helper_contract(&info, Some(required))
-    {
-      return Err(Error::Verification(format!(
-        "selected bundle helper does not advertise required ctld_helper contract {required}; provision and select a bundle that supports it"
-      )));
-    }
+    ensure_compatible_selection(&info, required)?;
     let manifest = super::manifest::Manifest::parse_installed(receipt, target)?;
     return Ok(Some(super::HelperSelection {
       executable: bundle.directory.join("ctld.app/Contents/MacOS/ctld"),
@@ -100,6 +104,25 @@ pub(super) async fn inspect_selected_bundle(
     }));
   }
   Ok(None)
+}
+
+fn ensure_compatible_selection(
+  info: &ComponentInfo,
+  required: Option<ProtocolVersion>,
+) -> Result<(), Error> {
+  if !compatible(info) {
+    return Err(Error::Verification(
+      "selected bundle helper is incompatible with this client".into(),
+    ));
+  }
+  if let Some(required) = required
+    && !compatible_for_helper_contract(info, Some(required))
+  {
+    return Err(Error::Verification(format!(
+      "selected bundle helper does not advertise required ctld_helper contract {required}; provision and select a bundle that supports it"
+    )));
+  }
+  Ok(())
 }
 
 pub(super) fn compatible_for_helper_contract(

@@ -2,42 +2,118 @@ use super::{
   CachedPackage, DesktopMetadata, DesktopSigning, DesktopTarget, Signing, activation::Workspace,
   invalid, macos, package_digest, report_json,
 };
-use crate::updater::sign::{self, DesktopInput};
+use crate::updater::sign::{self, DesktopInput, SigningMode};
 use ctl_client::cli::Channel;
 use ctl_client::remote_bundle::BundleSet;
 use ctl_core::private_fs;
 use std::io::{self, Read as _};
 use std::path::Path;
 
-pub(super) async fn sign_if_unsigned(
+impl From<SigningMode> for Signing {
+  fn from(mode: SigningMode) -> Self {
+    match mode {
+      SigningMode::DeveloperId => Self::Signed,
+      SigningMode::Provision => Self::Provisioned,
+      SigningMode::AdHoc => Self::AdHoc,
+    }
+  }
+}
+
+pub(super) async fn prepare_signing(
+  home: &Path,
   work: &Workspace,
   mut package: CachedPackage,
+  mode: SigningMode,
+  interactive: bool,
 ) -> io::Result<CachedPackage> {
-  if package.metadata.signing != Signing::Unsigned {
+  if package.metadata.signing == Signing::Provided {
+    let staging = inspection_directory(work)?;
+    let (app, version) = macos::stage_for_signing(&package.archive, &staging)?;
+    package.metadata.signing = if macos::verify_provided_distribution(&app, &version)? {
+      Signing::Signed
+    } else {
+      Signing::Unsigned
+    };
+    package
+      .metadata
+      .bundle_id
+      .get_or_insert_with(|| version.clone());
+    package.metadata.app_version = Some(version);
+  }
+  if package.metadata.signing == Signing::Signed {
+    package.metadata.signing_mode = Some(mode);
     return Ok(package);
+  }
+  if let Some(source) = &package.metadata.signed_from {
+    if package.metadata.signing == Signing::from(mode) && verified_for_reuse(work, &package, mode)?
+    {
+      return Ok(package);
+    }
+    package = work.cached(source)?.ok_or_else(|| {
+      invalid("the unsigned desktop source is missing; reinstall from the original source")
+    })?;
+  }
+  if package.metadata.signing != Signing::Unsigned {
+    return Err(invalid("expected an unsigned macOS desktop archive"));
   }
   if package_digest(&package.archive)? != package.metadata.content_id {
     return Err(invalid("unsigned desktop archive checksum mismatch"));
   }
   work.cache(&package)?;
-  if let Some(signed) = work.cached_signed_derivative(&package)? {
+  if let Some(mut signed) = work.cached_signed_derivative(&package, mode)?
+    && verified_for_reuse(work, &signed, mode)?
+  {
+    signed.naming = package.naming;
+    signed.metadata.signing_mode = Some(mode);
     return Ok(signed);
   }
   let target = DesktopTarget::native()?;
   let (version, _) = build_identity(&package.metadata)?;
-  let Some(archive) =
-    sign::sign_for_install(&package.archive, version, target, work.staging()).await?
-  else {
-    eprintln!(
-      "Continuing with unsigned ctmux. Automatic signing needs a Developer ID Application identity and Apple signing credentials."
-    );
-    return Ok(package);
-  };
+  let archive = sign::sign_for_install(
+    home,
+    &package.archive,
+    version,
+    target,
+    work.staging(),
+    mode,
+    interactive,
+  )
+  .await?;
   let digest = package_digest(&archive)?;
   package.metadata.signed_from = Some(std::mem::replace(&mut package.metadata.content_id, digest));
-  package.metadata.signing = Signing::Signed;
+  package.metadata.signing = mode.into();
+  package.metadata.signing_mode = Some(mode);
   package.archive = archive;
   Ok(package)
+}
+
+fn inspection_directory(work: &Workspace) -> io::Result<std::path::PathBuf> {
+  let directory = work
+    .staging()
+    .join(format!("signing-check-{}", uuid::Uuid::new_v4()));
+  private_fs::create_directory(&directory)?;
+  Ok(directory)
+}
+
+fn verified_for_reuse(
+  work: &Workspace,
+  package: &CachedPackage,
+  mode: SigningMode,
+) -> io::Result<bool> {
+  if mode == SigningMode::DeveloperId {
+    return Ok(true);
+  }
+  let (version, _) = build_identity(&package.metadata)?;
+  match macos::stage_local(
+    &package.archive,
+    &inspection_directory(work)?,
+    version,
+    mode,
+  ) {
+    Ok(_) => Ok(true),
+    Err(error) if error.kind() == io::ErrorKind::TimedOut => Ok(false),
+    Err(error) => Err(error),
+  }
 }
 
 pub(in crate::updater) async fn sign_cached(
@@ -45,6 +121,7 @@ pub(in crate::updater) async fn sign_cached(
   channel: Option<Channel>,
   version: Option<&str>,
   target: DesktopTarget,
+  mode: Option<SigningMode>,
   json: bool,
 ) -> io::Result<()> {
   let work = Workspace::begin(home)?;
@@ -59,6 +136,33 @@ pub(in crate::updater) async fn sign_cached(
     }
     println!("The cached desktop build is already signed.");
     return Ok(());
+  }
+  let mode = mode.or(package.metadata.signing_mode).unwrap_or_default();
+  if mode != SigningMode::DeveloperId {
+    let signed = prepare_signing(home, &work, package, mode, !json).await?;
+    work.cache(&signed)?;
+    let cached = work
+      .cached(&signed.metadata.content_id)?
+      .ok_or_else(|| invalid("signed desktop archive is missing from the cache"))?;
+    if json {
+      return report_json(&serde_json::json!({
+        "status": "signed",
+        "signing": signed.metadata.signing,
+        "bundle_id": signed.metadata.bundle_id,
+        "target": signed.metadata.target_triple,
+        "archive": cached.archive,
+      }));
+    }
+    println!(
+      "Signed the cached desktop build at {}.",
+      cached.archive.display()
+    );
+    return Ok(());
+  }
+  if let Some(source) = &package.metadata.signed_from {
+    package = work
+      .cached(source)?
+      .ok_or_else(|| invalid("the unsigned desktop source is missing"))?;
   }
   if package.metadata.signing != Signing::Unsigned {
     return Err(invalid("Choose a verified cached CI desktop build to sign"));

@@ -308,15 +308,25 @@ certificate and its private key in the Keychain, the matching distribution
 profile for `ctld`, and an Apple notary API key.
 Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
 `APPLE_API_ISSUER` locally. The build job can publish unsigned files. On a Mac
-with those credentials and a Developer ID identity, `ctlup install app` and
-`ctlup update app` sign and notarize an unsigned published package before
-activation. When the credentials or identity are absent, installation continues
-unsigned with a message. A signing or notarization failure preserves the
-previous active desktop selection.
+with those credentials and a Developer ID identity, `ctlup install` and
+`ctlup update` sign and notarize an unsigned native package before activation.
+Already signed release packages are verified as shipped. Missing credentials
+or a signing failure preserves the previous active selection.
+
+Use `--provision` to sign `ctld` for this Mac using an Apple Development
+certificate and a matching Xcode provisioning profile. Sign in to Xcode on
+first use. If several eligible teams are available, `ctlup` asks which one to
+use. The selected Team ID is saved in
+`$CTL_DATA_DIR/ctlup/signing/provisioning-team` for both runtime and desktop
+signing. Free Personal Team profiles expire after seven days and can be renewed
+through Xcode. Use `--ad-hoc` to apply a local signature without an Apple account.
+An ad hoc helper cannot access the protected Keychain for saved credentials or
+Touch ID approval. Updates reuse the selected installation mode.
 
 ```sh
-ctlup install app --channel nightly
-ctlup sign --channel nightly
+ctlup install app --channel nightly --provision
+ctlup install --channel nightly --ad-hoc
+ctlup sign --channel nightly --provision
 ctlup sign --version BUILD_ID
 ```
 
@@ -326,12 +336,14 @@ an exact build ID, including a Nightly build ID. The target defaults to the
 Mac's architecture. Add `--target x86_64-apple-darwin` when that target's archive
 is cached locally.
 
-For an unsigned cached build, the command verifies the archive, signs and
+With Developer ID, the command verifies the unsigned cached archive, signs and
 notarizes the app, and exports its archive, a new DMG, checksums, and a release
 manifest. It prints the output path under
 `~/.tokn/ctl/ctlup/signed/v<BUILD_ID>/<TARGET>/`, or under the selected
 `CTL_DATA_DIR` profile. The active app selection is preserved. An upstream
 package that is already signed reports that status. Existing output is preserved.
+With `--provision` or `--ad-hoc`, signing caches a locally signed archive for
+future installation.
 
 Signing reads the app archive locally and contacts Apple for notarization.
 Profile renewal can also require network access. Automatically signed

@@ -51,6 +51,11 @@ pub(crate) fn main() {
     println!("{}", ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION);
     return;
   }
+  #[cfg(target_os = "macos")]
+  if matches!(arguments.command, Command::MacosRuntimeSigningVersion) {
+    println!("1");
+    return;
+  }
   if matches!(arguments.command, Command::ComponentInfo) {
     if let Err(error) = crate::component_info::print() {
       eprintln!("ctlup: {error}");
@@ -88,6 +93,8 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match arguments.command {
     Command::ComponentInfo | Command::InstallationLayoutVersion => unreachable!(),
+    #[cfg(target_os = "macos")]
+    Command::MacosRuntimeSigningVersion => unreachable!(),
     Command::Install(options) => run_install(&home, &options).await?,
     Command::Update(options) => run_update(&home, &options).await?,
     Command::Bundle { command } => component::run(&home, command).await?,
@@ -174,6 +181,8 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
 
 async fn run_install(home: &Path, options: &arguments::InstallArguments) -> io::Result<()> {
   let targets = options.destination.resolve()?;
+  let signing = options.signing.mode();
+  validate_signing(signing, &targets)?;
   if options.package == arguments::PackageSelection::Runtime {
     return update::install(home, options, &targets).await;
   }
@@ -191,6 +200,7 @@ async fn run_install(home: &Path, options: &arguments::InstallArguments) -> io::
       options.release.as_deref(),
       options.pr,
       options.from.as_deref(),
+      signing,
       options.json,
     )
     .await
@@ -201,16 +211,32 @@ async fn run_install(home: &Path, options: &arguments::InstallArguments) -> io::
 
 async fn run_update(home: &Path, options: &arguments::UpdateArguments) -> io::Result<()> {
   let targets = options.destination.resolve()?;
+  let signing = options.signing.mode();
+  validate_signing(signing, &targets)?;
   if options.package == arguments::PackageSelection::Runtime {
-    return update::run(home, &targets, options.check, options.json).await;
+    return update::run(home, &targets, options.check, signing, options.json).await;
   }
   require_local(targets[0])?;
   #[cfg(any(target_os = "macos", target_os = "linux", windows))]
   {
-    app::update(home, options.check, options.json).await
+    app::update(home, options.check, signing, options.json).await
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
   Err(unsupported_app())
+}
+
+fn validate_signing(
+  signing: Option<sign::SigningMode>,
+  targets: &[TargetOptions<'_>],
+) -> io::Result<()> {
+  if signing.is_some() && (!cfg!(target_os = "macos") || targets.iter().any(TargetOptions::remote))
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "--provision and --ad-hoc apply to installations on this Mac",
+    ));
+  }
+  Ok(())
 }
 
 async fn run_status(home: &Path, options: &arguments::StatusArguments) -> io::Result<()> {

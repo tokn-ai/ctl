@@ -22,6 +22,8 @@ pub use remote::{
   remote_status, verify_remote_activation,
 };
 pub use show::{InstallationShow, InstalledBuild, show};
+#[cfg(target_os = "macos")]
+pub(crate) use updater::provision_runtime_signing_manager;
 pub use updater::{
   provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
 };

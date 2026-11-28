@@ -96,6 +96,9 @@ pub(super) enum Command {
   PrepareInstall,
   #[command(hide = true)]
   InstallationLayoutVersion,
+  #[cfg(target_os = "macos")]
+  #[command(hide = true)]
+  MacosRuntimeSigningVersion,
   #[command(hide = true)]
   UpdaterDigest,
 }
@@ -238,11 +241,36 @@ pub(super) enum PackageSelection {
   App,
 }
 
+#[derive(Debug, Default, Args)]
+pub(super) struct SigningArguments {
+  /// Sign for this Mac with an Apple Development identity and provisioning profile.
+  #[arg(long, conflicts_with = "ad_hoc")]
+  provision: bool,
+  /// Sign for this Mac without Apple credentials. Saved credentials are unavailable.
+  #[arg(long)]
+  ad_hoc: bool,
+}
+
+impl SigningArguments {
+  pub(super) fn mode(&self) -> Option<super::sign::SigningMode> {
+    use super::sign::SigningMode;
+    if self.provision {
+      Some(SigningMode::Provision)
+    } else if self.ad_hoc {
+      Some(SigningMode::AdHoc)
+    } else {
+      None
+    }
+  }
+}
+
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("source").args(["channel", "release", "pr", "from"])))]
 pub(super) struct InstallArguments {
   #[command(flatten)]
   pub destination: DestinationArguments,
+  #[command(flatten)]
+  pub signing: SigningArguments,
   #[arg(value_enum, default_value = "runtime")]
   pub package: PackageSelection,
   /// Track the selected publication channel.
@@ -271,10 +299,12 @@ pub(super) struct InstallArguments {
 pub(super) struct UpdateArguments {
   #[command(flatten)]
   pub destination: DestinationArguments,
+  #[command(flatten)]
+  pub signing: SigningArguments,
   #[arg(value_enum, default_value = "runtime")]
   pub package: PackageSelection,
   /// Check the recorded source without installing anything.
-  #[arg(long)]
+  #[arg(long, conflicts_with_all = ["provision", "ad_hoc"])]
   pub check: bool,
   #[arg(long)]
   pub json: bool,
@@ -292,6 +322,8 @@ pub(super) struct StatusArguments {
 
 #[derive(Debug, Args)]
 pub(super) struct SignArguments {
+  #[command(flatten)]
+  pub signing: SigningArguments,
   /// Select a cached desktop build by its exact build ID.
   #[arg(long, group = "cached_desktop")]
   pub version: Option<String>,
@@ -302,7 +334,7 @@ pub(super) struct SignArguments {
   #[arg(long, requires = "cached_desktop", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
   pub target: Option<String>,
   /// Checkout containing the development signer. Defaults to the current directory.
-  #[arg(long, conflicts_with = "cached_desktop")]
+  #[arg(long, conflicts_with_all = ["cached_desktop", "provision", "ad_hoc"])]
   pub workspace: Option<PathBuf>,
   /// Output the result as JSON.
   #[arg(long)]
@@ -351,6 +383,23 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn macos_signing_modes_are_explicit_and_mutually_exclusive() {
+    use super::super::sign::SigningMode;
+    for command in ["install", "update", "sign"] {
+      assert!(Arguments::try_parse_from(["ctlup", command, "--provision", "--ad-hoc"]).is_err());
+      let arguments = Arguments::try_parse_from(["ctlup", command, "--ad-hoc"]).unwrap();
+      let signing = match arguments.command {
+        Command::Install(options) => options.signing,
+        Command::Update(options) => options.signing,
+        Command::Sign(options) => options.signing,
+        _ => unreachable!(),
+      };
+      assert_eq!(signing.mode(), Some(SigningMode::AdHoc));
+    }
+    assert!(Arguments::try_parse_from(["ctlup", "update", "--check", "--provision"]).is_err());
+  }
 
   #[test]
   fn install_and_update_distinguish_source_selection_from_tracking() {
@@ -497,6 +546,7 @@ mod tests {
         target: None,
         workspace: None,
         json: false,
+        ..
       })
     ));
     let args = Arguments::try_parse_from(["ctlup", "sign", "--version", "v0.1.5"]).unwrap();

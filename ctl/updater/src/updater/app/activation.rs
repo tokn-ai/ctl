@@ -1,8 +1,8 @@
-#[cfg(target_os = "macos")]
-use super::Signing;
 use super::{
   CachedPackage, DesktopMetadata, DesktopNaming, DesktopPayload, Digest, app_destination, invalid,
 };
+#[cfg(target_os = "macos")]
+use super::{Signing, SigningMode};
 #[cfg(target_os = "macos")]
 use ctl_client::remote_bundle::desktop::DesktopTarget;
 use ctl_core::component_update::BundleChannel;
@@ -20,6 +20,14 @@ use std::{
 
 const CACHE_REFERENCES: &str = "references.json";
 const SIGNED_REFERENCE: &str = "signed.json";
+
+fn signing_reference(signing: super::Signing) -> &'static str {
+  match signing {
+    super::Signing::Provisioned => "provisioned.json",
+    super::Signing::AdHoc => "ad-hoc.json",
+    _ => SIGNED_REFERENCE,
+  }
+}
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +143,9 @@ impl Workspace {
         Err(error) => return Err(error),
       }
     }
-    let temporary = self.staging.join("download");
+    let temporary = self
+      .staging
+      .join(format!("download-{}", uuid::Uuid::new_v4()));
     private_fs::create_directory(&temporary)?;
     let archive = temporary.join("package");
     super::copy_package(&package.archive, &archive)?;
@@ -182,13 +192,15 @@ impl Workspace {
     filename: &str,
     value: &impl Serialize,
   ) -> io::Result<()> {
-    let staged = self.staging.join(filename);
+    let staged = self
+      .staging
+      .join(format!("reference-{}", uuid::Uuid::new_v4()));
     write_private_json(&staged, value)?;
     fs::rename(staged, directory.join(filename))?;
     private_fs::sync_directory(directory)
   }
 
-  fn signed_reference(&self, source: &Digest) -> io::Result<Option<Digest>> {
+  fn signed_reference(&self, source: &Digest, filename: &str) -> io::Result<Option<Digest>> {
     let directory = self.downloads.join(source.as_str());
     let Some(info) = metadata(&directory)? else {
       return Ok(None);
@@ -196,7 +208,7 @@ impl Workspace {
     if !private_fs::is_directory(&info) {
       return Err(invalid("unsafe cached desktop package directory"));
     }
-    let signed: Digest = match read_private_json(&directory.join(SIGNED_REFERENCE)) {
+    let signed: Digest = match read_private_json(&directory.join(filename)) {
       Ok(signed) => signed,
       Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
       Err(error) => return Err(error),
@@ -212,12 +224,13 @@ impl Workspace {
 
   fn remember_package(&self, metadata: &DesktopMetadata) -> io::Result<()> {
     if let Some(source) = &metadata.signed_from {
-      if self.signed_reference(source)?.as_ref() == Some(&metadata.content_id) {
+      let reference = signing_reference(metadata.signing);
+      if self.signed_reference(source, reference)?.as_ref() == Some(&metadata.content_id) {
         return Ok(());
       }
       let directory = self.downloads.join(source.as_str());
       if directory.is_dir() {
-        return self.write_reference(&directory, SIGNED_REFERENCE, &metadata.content_id);
+        return self.write_reference(&directory, reference, &metadata.content_id);
       }
       // A signed archive is still usable for repair if its original input was removed.
       return Ok(());
@@ -292,7 +305,7 @@ impl Workspace {
     };
     if !matches!(
       package.metadata.signing,
-      Signing::Signed | Signing::Unsigned
+      Signing::Signed | Signing::Unsigned | Signing::Provisioned | Signing::AdHoc
     ) {
       return Err(invalid("active desktop is not a published macOS build"));
     }
@@ -398,15 +411,19 @@ impl Workspace {
   pub(super) fn cached_signed_derivative(
     &self,
     source: &CachedPackage,
+    mode: SigningMode,
   ) -> io::Result<Option<CachedPackage>> {
-    let Some(derived) = self.signed_reference(&source.metadata.content_id)? else {
+    let signing = Signing::from(mode);
+    let Some(derived) =
+      self.signed_reference(&source.metadata.content_id, signing_reference(signing))?
+    else {
       return Ok(None);
     };
     let Some(package) = self.cached(&derived)? else {
       return Ok(None);
     };
     let metadata = &package.metadata;
-    if metadata.signing != Signing::Signed
+    if metadata.signing != signing
       || metadata.signed_from.as_ref() != Some(&source.metadata.content_id)
       || metadata.target_triple != source.metadata.target_triple
       || metadata.app_version != source.metadata.app_version
@@ -526,8 +543,10 @@ impl Workspace {
       }
     }
     for source in sources {
-      if let Some(signed) = self.signed_reference(&source)? {
-        retained.insert(signed.as_str().to_owned());
+      for reference in [SIGNED_REFERENCE, "provisioned.json", "ad-hoc.json"] {
+        if let Some(signed) = self.signed_reference(&source, reference)? {
+          retained.insert(signed.as_str().to_owned());
+        }
       }
       retained.insert(source.as_str().to_owned());
     }
@@ -914,7 +933,10 @@ mod tests {
     let mut signed = fixture.package("signed archive", "0.1.5", BundleChannel::Stable);
     signed.metadata.signing = Signing::Signed;
     signed.metadata.signed_from = Some(stable.metadata.content_id.clone());
-    for package in [&old, &stable, &nightly, &signed] {
+    let mut ad_hoc = fixture.package("ad hoc archive", "0.1.5", BundleChannel::Stable);
+    ad_hoc.metadata.signing = Signing::AdHoc;
+    ad_hoc.metadata.signed_from = Some(stable.metadata.content_id.clone());
+    for package in [&old, &stable, &nightly, &signed, &ad_hoc] {
       work.cache(package).unwrap();
     }
     work.prune_downloads(None).unwrap();
@@ -927,8 +949,19 @@ mod tests {
       assert_eq!(found.metadata.content_id, expected.metadata.content_id);
       assert_eq!(found.naming.installation_layout_version, Some(7));
     }
-    let cached = work.cached_signed_derivative(&stable).unwrap().unwrap();
+    let cached = work
+      .cached_signed_derivative(&stable, SigningMode::DeveloperId)
+      .unwrap()
+      .unwrap();
     assert_eq!(cached.metadata.content_id, signed.metadata.content_id);
+    let cached_ad_hoc = work
+      .cached_signed_derivative(&stable, SigningMode::AdHoc)
+      .unwrap()
+      .unwrap();
+    assert_eq!(
+      cached_ad_hoc.metadata.content_id,
+      ad_hoc.metadata.content_id
+    );
     let selected = DesktopSelection {
       content_id: cached.metadata.content_id.as_str().to_owned(),
       source: DesktopSource::Channel {
@@ -938,7 +971,12 @@ mod tests {
     let active = work.active_signing_package(Some(&selected)).unwrap();
     assert_eq!(active.metadata.content_id, cached.metadata.content_id);
     fs::write(cached.archive, "damaged signed archive").unwrap();
-    assert!(work.cached_signed_derivative(&stable).unwrap().is_none());
+    assert!(
+      work
+        .cached_signed_derivative(&stable, SigningMode::DeveloperId)
+        .unwrap()
+        .is_none()
+    );
   }
 
   #[test]

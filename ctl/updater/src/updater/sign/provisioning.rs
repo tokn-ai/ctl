@@ -13,9 +13,9 @@ const PROJECT: &str = "ctld-provisioning.xcodeproj";
 const PROFILE_LIMIT: u64 = 2 * 1024 * 1024;
 const PROFILE_OVERRIDE: &str = "CTLD_PROVISIONING_PROFILE";
 
-pub(super) struct Profile {
-  pub(super) path: PathBuf,
-  pub(super) team: String,
+pub(in crate::updater) struct Profile {
+  pub(in crate::updater) path: PathBuf,
+  pub(in crate::updater) team: String,
   _stage: Stage,
 }
 
@@ -132,20 +132,32 @@ pub(in crate::updater) fn verify_embedded_profile(path: &Path, team: &str) -> io
   Authorization::from_plist(&output.stdout)?.verify(team)
 }
 
+pub(super) enum TeamSelection<'a> {
+  Reuse,
+  Reselect,
+  Installed(&'a str),
+}
+
 pub(super) async fn profile(
   runner: &Runner,
   home: &Path,
   staging: &Path,
-  expected_team: Option<&str>,
+  selection: TeamSelection<'_>,
   interactive: bool,
 ) -> io::Result<Profile> {
+  let expected_team = match selection {
+    TeamSelection::Installed(team) => Some(team),
+    _ => None,
+  };
   if expected_team.is_some_and(|team| !valid_team(team)) {
     return Err(invalid("invalid installed Apple Team ID"));
   }
   let stage = Stage::new(staging)?;
   let destination = stage.0.join("ctld.provisionprofile");
   let identities = identities(runner, &stage.0).await?;
-  if let Some(path) = std::env::var_os(PROFILE_OVERRIDE).filter(|path| !path.is_empty()) {
+  if !matches!(selection, TeamSelection::Reselect)
+    && let Some(path) = std::env::var_os(PROFILE_OVERRIDE).filter(|path| !path.is_empty())
+  {
     let path = std::path::absolute(path)?;
     snapshot(&path, &destination)?;
     let profile = inspect(runner, &destination).await?;
@@ -171,29 +183,26 @@ pub(super) async fn profile(
   } else {
     None
   };
-  let team = match preferred.or(configured.as_deref()) {
-    Some(team) => team.to_owned(),
-    None if identities.is_empty() => {
+  let preferred = preferred.or(configured.as_deref());
+  let reselect = matches!(selection, TeamSelection::Reselect) && can_prompt;
+  let team = match preferred {
+    _ if reselect && !identities.is_empty() => choose_team(runner, &identities, preferred).await?,
+    _ if identities.is_empty() && (preferred.is_none() || reselect) => {
       let project = install_project(&settings)?;
       if can_prompt {
-        runner
-          .output(
-            Command::new("/usr/bin/open")
-              .args(["-a", "Xcode"])
-              .arg(&project),
-          )
-          .await?;
+        open_xcode(runner, &project).await?;
       }
       return Err(io::Error::other(format!(
-        "No Apple Development signing identity is available. Sign in to Xcode, open the provisioning project at {}, choose a team under Signing & Capabilities, and build it once. Then rerun with --provision.",
+        "No Apple Development signing identity is available. Sign in to Xcode, open the provisioning project at {}, choose a team under Signing & Capabilities, and build it once. Then rerun your ctlup command.",
         project.display(),
       )));
     }
+    Some(team) => team.to_owned(),
     None if identities.len() == 1 => identities.keys().next().expect("one Apple Team").clone(),
-    None if can_prompt => choose_team(runner, &identities).await?,
+    None if can_prompt => choose_team(runner, &identities, None).await?,
     None => {
       return Err(io::Error::other(
-        "Multiple Apple Teams are available. Run with --provision from a terminal to choose one, or set CTLD_PROVISIONING_PROFILE.",
+        "Multiple Apple Teams are available. Run ctlup sign --provision --team from a terminal to choose one.",
       ));
     }
   };
@@ -210,14 +219,48 @@ pub(super) async fn profile(
     let authorization = inspect(runner, &destination).await?;
     verify_identity(&authorization, &team, &refreshed_identities)?;
   }
-  if expected_team.is_none() && cached.is_none() {
-    save_team(&settings, &team)?;
+  runner.check()?;
+  if expected_team.is_none() && (cached.is_none() || reselect) {
+    save_team(&settings, &team, cached.as_deref())?;
   }
   Ok(Profile {
     path: destination,
     team,
     _stage: stage,
   })
+}
+
+async fn open_xcode(runner: &Runner, project: &Path) -> io::Result<()> {
+  runner
+    .output(
+      Command::new("/usr/bin/open")
+        .args(["-a", "Xcode"])
+        .arg(project),
+    )
+    .await?;
+  Ok(())
+}
+
+pub(super) async fn select_profile(
+  runner: &Runner,
+  home: &Path,
+  selection: TeamSelection<'_>,
+  interactive: bool,
+) -> io::Result<Profile> {
+  let staging = signing_directory(home)?;
+  profile(runner, home, &staging, selection, interactive).await
+}
+
+pub(in crate::updater) fn preferred_team(home: &Path) -> io::Result<Option<String>> {
+  let settings = signing_directory(home)?;
+  match read_team(&settings)? {
+    Some(team) => Ok(Some(team)),
+    None => configured_team(&settings),
+  }
+}
+
+pub(in crate::updater) fn has_profile_override() -> bool {
+  std::env::var_os(PROFILE_OVERRIDE).is_some_and(|path| !path.is_empty())
 }
 
 fn verify_identity(
@@ -438,8 +481,11 @@ fn certificate_choice(output: &[u8], available: &BTreeSet<String>) -> Option<(St
 async fn choose_team(
   runner: &Runner,
   identities: &BTreeMap<String, Vec<Identity>>,
+  preferred: Option<&str>,
 ) -> io::Result<String> {
   let terminal = private_fs::options().read(true).open("/dev/tty")?;
+  let default_index =
+    preferred.and_then(|team| identities.keys().position(|candidate| candidate == team));
   eprintln!("Choose the Apple Team to provision ctld for this Mac.");
   for (index, (team, identities)) in identities.iter().enumerate() {
     let names = identities
@@ -449,23 +495,35 @@ async fn choose_team(
     let label = names.into_iter().collect::<Vec<_>>().join(", ");
     eprintln!("  {}. {label} ({team})", index + 1);
   }
-  eprint!("Team number: ");
+  if let Some(index) = default_index {
+    eprint!("Team number [{}]: ", index + 1);
+  } else {
+    eprint!("Team number: ");
+  }
   io::stderr().flush()?;
   let input = runner.cancellable(read_choice(terminal)).await?;
-  let index = input
-    .trim()
-    .parse::<usize>()
-    .ok()
-    .and_then(|choice| choice.checked_sub(1));
-  index
-    .and_then(|index| identities.keys().nth(index))
-    .cloned()
+  team_choice(&input, default_index, identities.keys().map(String::as_str))
+    .map(str::to_owned)
     .ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::InvalidInput,
         "choose one of the listed Apple Team numbers",
       )
     })
+}
+
+fn team_choice<'a>(
+  input: &str,
+  default: Option<usize>,
+  mut teams: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+  let input = input.trim();
+  let index = if input.is_empty() {
+    default?
+  } else {
+    input.parse::<usize>().ok()?.checked_sub(1)?
+  };
+  teams.nth(index)
 }
 
 async fn read_choice(mut terminal: fs::File) -> io::Result<String> {
@@ -549,7 +607,34 @@ fn read_team(settings: &Path) -> io::Result<Option<String>> {
   Ok(Some(team.to_owned()))
 }
 
-fn save_team(settings: &Path, team: &str) -> io::Result<()> {
+fn save_team(settings: &Path, team: &str, previous: Option<&str>) -> io::Result<()> {
+  let lock = private_fs::options()
+    .create(true)
+    .truncate(false)
+    .write(true)
+    .open(settings.join("provisioning-team.lock"))?;
+  if !private_fs::is_private_file(&lock.metadata()?) {
+    return Err(invalid(
+      "the Apple Team selection lock must be a private regular file",
+    ));
+  }
+  lock.try_lock().map_err(|error| match error {
+    fs::TryLockError::WouldBlock => io::Error::new(
+      io::ErrorKind::WouldBlock,
+      "another ctlup run is saving an Apple Team; retry signing",
+    ),
+    fs::TryLockError::Error(error) => error,
+  })?;
+  let saved = read_team(settings)?;
+  if saved.as_deref() == Some(team) {
+    return Ok(());
+  }
+  if saved.as_deref() != previous {
+    return Err(io::Error::new(
+      io::ErrorKind::WouldBlock,
+      "another ctlup run chose a different Apple Team; rerun signing",
+    ));
+  }
   let temporary = Stage::new(settings)?;
   let source = temporary.0.join("team");
   let mut file = private_fs::options()
@@ -558,19 +643,8 @@ fn save_team(settings: &Path, team: &str) -> io::Result<()> {
     .open(&source)?;
   writeln!(file, "{team}")?;
   file.sync_all()?;
-  match fs::hard_link(source, settings.join("provisioning-team")) {
-    Ok(()) => private_fs::sync_directory(settings),
-    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-      if read_team(settings)?.as_deref() == Some(team) {
-        Ok(())
-      } else {
-        Err(io::Error::other(
-          "another ctlup run chose a different Apple Team; rerun signing",
-        ))
-      }
-    }
-    Err(error) => Err(error),
-  }
+  fs::rename(source, settings.join("provisioning-team"))?;
+  private_fs::sync_directory(settings)
 }
 
 fn configured_team(settings: &Path) -> io::Result<Option<String>> {
@@ -689,6 +763,54 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn local_signing_reuses_the_saved_team_and_xcode_project() {
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let settings = Stage::new(&target).unwrap();
+    assert_eq!(read_team(&settings.0).unwrap(), None);
+    save_team(&settings.0, "TEAM123ABC", None).unwrap();
+    save_team(&settings.0, "TEAM123ABC", None).unwrap();
+    assert!(save_team(&settings.0, "TEAM999ABC", None).is_err());
+    assert_eq!(
+      read_team(&settings.0).unwrap().as_deref(),
+      Some("TEAM123ABC")
+    );
+    save_team(&settings.0, "TEAM999ABC", Some("TEAM123ABC")).unwrap();
+    assert!(save_team(&settings.0, "TEAM123ABC", Some("TEAM123ABC")).is_err());
+    assert_eq!(
+      read_team(&settings.0).unwrap().as_deref(),
+      Some("TEAM999ABC")
+    );
+
+    let project = install_project(&settings.0).unwrap();
+    let config = project.join("project.pbxproj");
+    let configured = fs::read_to_string(&config)
+      .unwrap()
+      .replace("DEVELOPMENT_TEAM = \"\";", "DEVELOPMENT_TEAM = TEAM123ABC;");
+    fs::write(config, configured).unwrap();
+    assert_eq!(install_project(&settings.0).unwrap(), project);
+    assert_eq!(
+      configured_team(&settings.0).unwrap().as_deref(),
+      Some("TEAM123ABC")
+    );
+  }
+
+  #[test]
+  fn pressing_enter_keeps_the_default_team() {
+    let teams = ["TEAM123ABC", "TEAM999ABC"];
+    assert_eq!(
+      team_choice("\n", Some(1), teams.into_iter()),
+      Some("TEAM999ABC")
+    );
+    assert_eq!(
+      team_choice("1\n", Some(1), teams.into_iter()),
+      Some("TEAM123ABC")
+    );
+    assert_eq!(team_choice("", None, teams.into_iter()), None);
+    assert_eq!(team_choice("0", Some(1), teams.into_iter()), None);
+    assert_eq!(team_choice("3", Some(1), teams.into_iter()), None);
+  }
 
   #[test]
   fn offers_only_current_apple_development_identities_with_a_team() {

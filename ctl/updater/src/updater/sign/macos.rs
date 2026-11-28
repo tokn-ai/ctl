@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::future::Future;
-use std::io;
+use std::io::{self, IsTerminal as _, Read as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -27,11 +27,14 @@ const SIGNING_CONFIGURATION: &[&str] = &[
   "APPLE_API_ISSUER",
 ];
 
-pub(super) struct Runner(watch::Receiver<bool>);
+pub(super) struct Runner {
+  cancellation: watch::Receiver<bool>,
+  inherited_group: bool,
+}
 
 impl Runner {
-  fn check(&self) -> io::Result<()> {
-    if *self.0.borrow() {
+  pub(super) fn check(&self) -> io::Result<()> {
+    if *self.cancellation.borrow() {
       Err(interrupted())
     } else {
       Ok(())
@@ -39,7 +42,7 @@ impl Runner {
   }
 
   async fn cancelled(&self) {
-    let _ = self.0.clone().wait_for(|stop| *stop).await;
+    let _ = self.cancellation.clone().wait_for(|stop| *stop).await;
   }
 
   pub(super) async fn cancellable<T>(
@@ -73,14 +76,18 @@ impl Runner {
 
   async fn capture(&self, command: &mut Command) -> io::Result<Output> {
     self.check()?;
-    let child = command
+    command
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
-      .process_group(0)
-      .kill_on_drop(true)
-      .spawn()?;
-    let group = child
+      .kill_on_drop(true);
+    // Checkout recipes own the whole build group and kill it if their
+    // controlling process exits. Keep nested Xcode and signing jobs in it.
+    if !self.inherited_group {
+      command.process_group(0);
+    }
+    let child = command.spawn()?;
+    let pid = child
       .id()
       .and_then(|id| i32::try_from(id).ok())
       .and_then(Pid::from_raw)
@@ -90,8 +97,10 @@ impl Runner {
     let output = tokio::select! {
       result = &mut output => result?,
       () = self.cancelled() => {
-        let _ = kill_process_group(group, Signal::KILL);
-        let _ = output.await;
+        if !self.inherited_group {
+          let _ = kill_process_group(pid, Signal::KILL);
+          let _ = output.await;
+        }
         return Err(interrupted());
       }
     };
@@ -721,15 +730,25 @@ pub(in crate::updater) async fn export_desktop(
   .await
 }
 
+pub(in crate::updater) struct DesktopSigningOptions<'a> {
+  pub mode: SigningMode,
+  pub interactive: bool,
+  pub profile: Option<&'a provisioning::Profile>,
+}
+
 pub(in crate::updater) async fn sign_for_install(
   home: &Path,
   archive: &Path,
   app_version: &str,
   target: DesktopTarget,
   staging: &Path,
-  mode: SigningMode,
-  interactive: bool,
+  options: DesktopSigningOptions<'_>,
 ) -> io::Result<PathBuf> {
+  let DesktopSigningOptions {
+    mode,
+    interactive,
+    profile,
+  } = options;
   validate_build_name(app_version)?;
   let arch = target_architecture(target)?;
   with_signing_signals(async |runner| {
@@ -742,26 +761,43 @@ pub(in crate::updater) async fn sign_for_install(
         .0
     } else {
       let app = stage_input(archive, app_version, stage).await?;
-      let profile = match mode {
-        SigningMode::Provision => {
-          Some(provisioning::profile(runner, home, stage, None, interactive).await?)
-        }
-        _ => None,
-      };
-      let identity = match &profile {
-        Some(profile) => helper::Identity::Development(&profile.path),
-        None => helper::Identity::AdHoc,
-      };
       let helper_app = app.join(HELPER_APP);
-      helper::sign(
-        &helper_app.join(HELPER_EXECUTABLE),
-        &helper_app,
-        stage,
-        app_version,
-        identity,
-        runner,
-      )
-      .await?;
+      let binary = helper_app.join(HELPER_EXECUTABLE);
+      if let Some(profile) = profile {
+        helper::sign(
+          &binary,
+          &helper_app,
+          stage,
+          app_version,
+          helper::Identity::Development(&profile.path),
+          runner,
+        )
+        .await?;
+      } else if mode == SigningMode::Provision {
+        sign_provisioned_helper(
+          runner,
+          home,
+          DevelopmentHelper {
+            binary: &binary,
+            app: &helper_app,
+            stage,
+            version: app_version,
+            expected_team: None,
+            interactive,
+          },
+        )
+        .await?;
+      } else {
+        helper::sign(
+          &binary,
+          &helper_app,
+          stage,
+          app_version,
+          helper::Identity::AdHoc,
+          runner,
+        )
+        .await?;
+      }
       sign_app(runner, &app, "-").await?;
       app
     };
@@ -833,17 +869,19 @@ pub(in crate::updater) async fn sign_runtime_helper(
         .ok_or_else(|| io::Error::other("ctld signing did not report an Apple Team ID"))
     }
     SigningMode::Provision => {
-      let profile = provisioning::profile(runner, home, stage, None, interactive).await?;
-      helper::sign(
-        binary,
-        output_app,
-        stage,
-        version,
-        helper::Identity::Development(&profile.path),
+      sign_provisioned_helper(
         runner,
+        home,
+        DevelopmentHelper {
+          binary,
+          app: output_app,
+          stage,
+          version,
+          expected_team: None,
+          interactive,
+        },
       )
-      .await?;
-      Ok(profile.team)
+      .await
     }
     SigningMode::AdHoc => Err(io::Error::new(
       io::ErrorKind::InvalidInput,
@@ -853,13 +891,185 @@ pub(in crate::updater) async fn sign_runtime_helper(
   .await
 }
 
+struct DevelopmentHelper<'a> {
+  binary: &'a Path,
+  app: &'a Path,
+  stage: &'a Path,
+  version: &'a str,
+  expected_team: Option<&'a str>,
+  interactive: bool,
+}
+
+async fn sign_provisioned_helper(
+  runner: &Runner,
+  home: &Path,
+  input: DevelopmentHelper<'_>,
+) -> io::Result<String> {
+  let profile = provisioning::profile(
+    runner,
+    home,
+    input.stage,
+    input.expected_team.map_or(
+      provisioning::TeamSelection::Reuse,
+      provisioning::TeamSelection::Installed,
+    ),
+    input.interactive,
+  )
+  .await?;
+  helper::sign(
+    input.binary,
+    input.app,
+    input.stage,
+    input.version,
+    helper::Identity::Development(&profile.path),
+    runner,
+  )
+  .await?;
+  Ok(profile.team)
+}
+
+pub(in crate::updater) async fn select_provisioning(
+  home: &Path,
+  reselect: bool,
+  interactive: bool,
+) -> io::Result<provisioning::Profile> {
+  let selection = if reselect {
+    provisioning::TeamSelection::Reselect
+  } else {
+    provisioning::TeamSelection::Reuse
+  };
+  with_signing_signals(async |runner| {
+    provisioning::select_profile(runner, home, selection, interactive).await
+  })
+  .await
+}
+
+pub(in crate::updater) async fn checkout_profile(
+  home: &Path,
+  interactive: bool,
+) -> io::Result<Option<provisioning::Profile>> {
+  if !interactive || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+    return Ok(None);
+  }
+  select_provisioning(home, false, true).await.map(Some)
+}
+
+pub(in crate::updater) async fn sign_checkout_helper(
+  home: &Path,
+  artifact: &Path,
+  output: &Path,
+  version: &str,
+  interactive: bool,
+) -> io::Result<()> {
+  validate_build_name(version)?;
+  let inherited_group =
+    std::env::var_os("CTLUP_DEVELOPMENT_LIFELINE").is_some_and(|value| value == "1");
+  with_signing_process_group(inherited_group, async |runner| {
+    let mut scratch = Scratch::allocate(output)?;
+    let artifact = snapshot_checkout_helper(artifact, &scratch.stage)?;
+    let component = ctl_core::executable::inspect(&artifact).await?;
+    if component.build.version != version {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "ctld version differs from the checkout build",
+      ));
+    }
+    let assets = scratch.stage.join("helper");
+    private_fs::create_directory(&assets)?;
+    let app = assets.join("ctld.app");
+    let team = sign_provisioned_helper(
+      runner,
+      home,
+      DevelopmentHelper {
+        binary: &artifact,
+        app: &app,
+        stage: &scratch.stage,
+        version,
+        expected_team: None,
+        interactive,
+      },
+    )
+    .await?;
+    let receipt = ctl_client::development::write_development_helper_receipt(
+      &assets,
+      &component,
+      ctl_core::paths::native_target(),
+      &team,
+    )?;
+    let verified = ctl_client::setup::inspect_ctld_package(home, &assets, &receipt)
+      .await
+      .map_err(io::Error::other)?;
+    if verified.build != component.build
+      || !ctl_core::component::protocols_match(&verified.protocols, &component.protocols)
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "signed helper differs from the checkout build",
+      ));
+    }
+    runner.check()?;
+    scratch.finish(&assets)
+  })
+  .await
+}
+
+fn snapshot_checkout_helper(source: &Path, stage: &Path) -> io::Result<PathBuf> {
+  let limit = ctl_core::bundles::MAX_FILE_BYTES as u64;
+  let input = private_fs::options().read(true).open(source)?;
+  let metadata = input.metadata()?;
+  if !metadata.is_file()
+    || !private_fs::is_executable(&metadata)
+    || !(1..=limit).contains(&metadata.len())
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "invalid checkout ctld executable",
+    ));
+  }
+  let artifact = stage.join("ctld");
+  let mut file = private_fs::options()
+    .create_new(true)
+    .write(true)
+    .open(&artifact)?;
+  if io::copy(&mut input.take(limit + 1), &mut file)? != metadata.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "checkout ctld changed while copying",
+    ));
+  }
+  private_fs::set_executable(&file)?;
+  Ok(artifact)
+}
+
 pub(in crate::updater) async fn sign_ad_hoc_executable(binary: &Path) -> io::Result<()> {
   with_signing_signals(async |runner| sign_code(runner, binary, "-").await).await
 }
 
-async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) -> io::Result<()> {
-  let workspace = workspace.map_or_else(std::env::current_dir, Ok)?;
-  let prepared = ctl_client::development::renew_signing(home, &workspace).await?;
+async fn renew_development(runner: &Runner, home: &Path, json: bool) -> io::Result<()> {
+  let prepared = ctl_client::development::renew_signing(
+    home,
+    async |binary, app, version, team| {
+      let stage = app
+        .parent()
+        .ok_or_else(|| io::Error::other("ctld.app has no staging directory"))?;
+      sign_provisioned_helper(
+        runner,
+        home,
+        DevelopmentHelper {
+          binary,
+          app,
+          stage,
+          version,
+          expected_team: Some(team),
+          interactive: !json,
+        },
+      )
+      .await?;
+      runner.check()
+    },
+    || runner.check(),
+  )
+  .await?;
   let result = &prepared.result;
   if json {
     crate::updater::print_json(result)?;
@@ -873,6 +1083,17 @@ async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) 
 }
 
 pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
+  if options.team {
+    let profile = select_provisioning(home, true, !options.json).await?;
+    if options.json {
+      return crate::updater::print_json(&serde_json::json!({
+        "status": "provisioned",
+        "team_identifier": profile.team,
+      }));
+    }
+    println!("Apple Team {} is ready for local signing.", profile.team);
+    return Ok(());
+  }
   let mode = options.signing.mode();
   let implicit_development = mode.is_none()
     && options.channel.is_none()
@@ -883,9 +1104,7 @@ pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
       .is_some_and(|bundle| bundle.manifest.source == Source::Local);
   if options.workspace.is_some() || implicit_development {
     return with_signing_signals(async |runner| {
-      runner
-        .cancellable(renew_development(home, options.workspace, options.json))
-        .await
+      renew_development(runner, home, options.json).await
     })
     .await;
   }
@@ -913,12 +1132,22 @@ pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
 async fn with_signing_signals<T>(
   operation: impl AsyncFnOnce(&Runner) -> io::Result<T>,
 ) -> io::Result<T> {
+  with_signing_process_group(false, operation).await
+}
+
+async fn with_signing_process_group<T>(
+  inherited_group: bool,
+  operation: impl AsyncFnOnce(&Runner) -> io::Result<T>,
+) -> io::Result<T> {
   use tokio::signal::unix::{SignalKind, signal};
 
   let mut interrupt = signal(SignalKind::interrupt())?;
   let mut terminate = signal(SignalKind::terminate())?;
   let (stop, cancelled) = watch::channel(false);
-  let runner = Runner(cancelled);
+  let runner = Runner {
+    cancellation: cancelled,
+    inherited_group,
+  };
   let signing = operation(&runner);
   tokio::pin!(signing);
   tokio::select! {
@@ -1027,7 +1256,10 @@ mod tests {
     let scratch = scratch();
     let pid_file = scratch.stage.join("worker.pid");
     let (stop, cancelled) = watch::channel(false);
-    let runner = Runner(cancelled);
+    let runner = Runner {
+      cancellation: cancelled,
+      inherited_group: false,
+    };
     let mut command = Command::new("/bin/sh");
     command
       .args([

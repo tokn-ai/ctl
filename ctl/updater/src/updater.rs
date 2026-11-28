@@ -143,6 +143,15 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     }
     Command::Dev(options) => development::run(&home, options).await?,
     Command::Sign(options) => sign::run(&home, options).await?,
+    #[cfg(target_os = "macos")]
+    Command::SignDevelopmentHelper {
+      artifact,
+      output,
+      version,
+      non_interactive,
+    } => {
+      sign::sign_checkout_helper(&home, &artifact, &output, &version, !non_interactive).await?;
+    }
     Command::Release(options) => {
       release::run(&home, options).await?;
     }

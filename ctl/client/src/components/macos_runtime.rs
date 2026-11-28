@@ -38,6 +38,59 @@ pub enum MacosRuntimeHelper<'a> {
   },
 }
 
+pub(crate) struct SignedHelper {
+  files: BTreeMap<String, Vec<u8>>,
+  executables: Vec<String>,
+  pub(crate) receipt: Vec<u8>,
+}
+
+impl SignedHelper {
+  pub(crate) fn read(
+    app: &Path,
+    component: &ComponentInfo,
+    target: &str,
+    team_identifier: &str,
+    development: bool,
+  ) -> io::Result<Self> {
+    let parent = app
+      .parent()
+      .filter(|_| app.file_name().is_some_and(|name| name == "ctld.app"))
+      .ok_or_else(|| invalid("expected a staged ctld.app package"))?;
+    let mut files = BTreeMap::new();
+    let mut executables = Vec::new();
+    collect_app(parent, app, &mut files, &mut executables)?;
+    if !files.contains_key(SIGNED_EXECUTABLE) {
+      return Err(invalid("runtime signing did not produce a ctld executable"));
+    }
+    let archive = helper_archive(&files, &executables)?;
+    let receipt = crate::setup::create_runtime_helper_receipt(
+      component,
+      target,
+      team_identifier,
+      development,
+      hex::encode(Sha256::digest(&archive)),
+      archive.len() as u64,
+    )
+    .map_err(io::Error::other)?;
+    Ok(Self {
+      files,
+      executables,
+      receipt,
+    })
+  }
+
+  pub(crate) fn add_to(
+    mut self,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    executables: &mut Vec<String>,
+  ) {
+    files.insert("ctld".into(), self.files[SIGNED_EXECUTABLE].clone());
+    files.append(&mut self.files);
+    files.insert(SIGNED_RECEIPT.into(), self.receipt);
+    executables.append(&mut self.executables);
+  }
+}
+
 /// Inspects the receipt's declared mode. Local activation separately verifies
 /// the matching executable's signature, component identity, and entitlements.
 ///
@@ -145,28 +198,14 @@ pub async fn replace_macos_helper(
       team_identifier,
       development,
     } => {
-      let parent = app
-        .parent()
-        .filter(|_| app.file_name().is_some_and(|name| name == "ctld.app"))
-        .ok_or_else(|| invalid("expected a staged ctld.app package"))?;
-      let mut signed = BTreeMap::new();
-      collect_app(parent, app, &mut signed, &mut executables)?;
-      let executable = signed
-        .get(SIGNED_EXECUTABLE)
-        .ok_or_else(|| invalid("runtime signing did not produce a ctld executable"))?;
-      let archive = helper_archive(&signed, &executables)?;
-      let receipt = crate::setup::create_runtime_helper_receipt(
+      SignedHelper::read(
+        app,
         &original.components["ctld"],
         &original.target_triple,
         team_identifier,
         development,
-        hex::encode(Sha256::digest(&archive)),
-        archive.len() as u64,
-      )
-      .map_err(io::Error::other)?;
-      files.insert("ctld".into(), executable.clone());
-      files.insert(SIGNED_RECEIPT.into(), receipt);
-      files.append(&mut signed);
+      )?
+      .add_to(&mut files, &mut executables);
     }
   }
   let mut manifest = Manifest::new(

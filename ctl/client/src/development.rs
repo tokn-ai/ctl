@@ -15,11 +15,11 @@ const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 32 * 1024;
 
 mod desktop;
-pub use desktop::{DesktopBuild, build_desktop};
+pub use desktop::{DesktopBuild, DesktopHelperSigning, build_desktop};
 #[cfg(target_os = "macos")]
 mod renewal;
 #[cfg(target_os = "macos")]
-pub use renewal::renew_signing;
+pub use renewal::{renew_signing, write_development_helper_receipt};
 
 /// Returns an unsupported platform error for macOS helper signing renewal.
 /// # Errors
@@ -27,7 +27,8 @@ pub use renewal::renew_signing;
 #[cfg(not(target_os = "macos"))]
 pub fn renew_signing(
   _home: &Path,
-  _workspace: &Path,
+  _sign: impl AsyncFnOnce(&Path, &Path, &str, &str) -> io::Result<()>,
+  _before_activate: impl FnOnce() -> io::Result<()>,
 ) -> std::future::Ready<io::Result<PreparedDevelopment>> {
   std::future::ready(Err(io::Error::new(
     io::ErrorKind::Unsupported,
@@ -39,6 +40,7 @@ pub fn renew_signing(
 pub struct DevelopmentOptions {
   pub workspace: PathBuf,
   pub cargo_args: Vec<String>,
+  pub provisioning_profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ pub async fn install(home: &Path, options: DevelopmentOptions) -> io::Result<Pre
     workspace.clone()
   };
   let mut command = recipe_command(&recipe, &cargo_cwd);
+  configure_development_signer(&mut command, options.provisioning_profile.as_deref())?;
   command
     .arg("--workspace")
     .arg(&workspace)
@@ -208,6 +211,19 @@ fn recipe_command(recipe: &Path, cwd: &Path) -> tokio::process::Command {
   #[cfg(unix)]
   command.env("CTLUP_DEVELOPMENT_LIFELINE", "1");
   command
+}
+
+fn configure_development_signer(
+  command: &mut tokio::process::Command,
+  profile: Option<&Path>,
+) -> io::Result<()> {
+  if cfg!(target_os = "macos") {
+    command.env("CTLUP_DEVELOPMENT_EXECUTABLE", std::env::current_exe()?);
+    if let Some(profile) = profile {
+      command.env("CTLD_PROVISIONING_PROFILE", profile);
+    }
+  }
+  Ok(())
 }
 
 fn installed_executables(

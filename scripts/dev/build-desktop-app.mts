@@ -8,14 +8,13 @@ import { parseHelperComponent } from "../shared/protocol-contract.mts";
 import { createWindowsPortable } from "../shared/windows-portable.mts";
 import { buildDaemons } from "./daemon-build.mts";
 import { developmentEnvironment, signDevelopmentHelper } from "./ctld-signed.mts";
-import { runMacosCommand, type MacosCommandRunner } from "./macos-provisioning.mts";
+import { runBuildCommand, type BuildCommandRunner } from "./build-command.mts";
 import { ensurePrivateDirectory } from "./signed-runtime.mts";
 
 export interface DesktopBuildOptions {
   workspace: string;
   output: string;
   env?: NodeJS.ProcessEnv;
-  home_directory?: string;
 }
 
 export interface DesktopBuildResult {
@@ -25,15 +24,15 @@ export interface DesktopBuildResult {
   archive: "ctmux.app.tar.gz" | "ctmux.AppImage" | "ctmux.zip";
 }
 
-export const runDesktopBuildCommand: MacosCommandRunner = (command, args, context) => {
-  if (process.platform !== "win32" || command !== "pnpm") return runMacosCommand(command, args, context);
+export const runDesktopBuildCommand: BuildCommandRunner = (command, args, context) => {
+  if (process.platform !== "win32" || command !== "pnpm") return runBuildCommand(command, args, context);
   if (args[0] !== "--workspace-root" || args[1] !== "desktop:build") {
     throw new Error("unsupported Windows desktop build command");
   }
   // Use the same Node entry point as the native development launcher. Node
   // passes paths and flags directly to Tauri, including shell metacharacters.
   const app_directory = join(context.cwd, "apps/desktop");
-  return runMacosCommand(process.execPath, [
+  return runBuildCommand(process.execPath, [
     join(app_directory, "node_modules/@tauri-apps/cli/tauri.js"), "build", ...args.slice(2),
   ], { ...context, cwd: app_directory });
 };
@@ -41,7 +40,7 @@ export const runDesktopBuildCommand: MacosCommandRunner = (command, args, contex
 /** Build a checkout's complete desktop payload without installing or launching it. */
 export async function buildDesktopApp(
   options: DesktopBuildOptions,
-  run: MacosCommandRunner = runDesktopBuildCommand,
+  run: BuildCommandRunner = runDesktopBuildCommand,
   build: typeof buildDaemons = buildDaemons,
 ): Promise<DesktopBuildResult> {
   const workspace = await realpath(options.workspace);
@@ -115,15 +114,19 @@ export async function buildDesktopApp(
       throw new Error("locally compiled ctld has invalid source identity or version");
     }
     const app = join(helper, "ctld.app");
-    try {
-      await signDevelopmentHelper({
-        repository_root: workspace, target_directory, artifact,
-        target: native, app_version, output_directory: helper, env,
-        home_directory: options.home_directory,
-      }, run);
-    } catch (error) {
-      const detail = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0];
-      console.error(`ctld provisioning or signing failed, building an unsigned helper. ${detail}`);
+    let unsigned = env.CTLUP_SKIP_DEVELOPMENT_SIGNING === "1";
+    if (!unsigned) {
+      try {
+        await signDevelopmentHelper({
+          repository_root: workspace, artifact, app_version, output_directory: helper, env,
+        }, run);
+      } catch (error) {
+        const detail = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0];
+        console.error(`ctld provisioning or signing failed, building an unsigned helper. ${detail}`);
+        unsigned = true;
+      }
+    }
+    if (unsigned) {
       await rm(helper, { recursive: true, force: true });
       await invoke("/bin/sh", ["scripts/ci/package-ctld-app.sh", artifact, app, app_version], {
         CTLD_PROVISIONING_PROFILE: undefined, CTLD_REQUIRE_DISTRIBUTION_SIGNING: "false",

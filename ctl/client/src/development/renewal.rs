@@ -1,36 +1,57 @@
-//! Replace an expired development helper signature using the installed build.
+//! Package development helpers and renew them using the installed build.
 
-use super::{
-  MAX_DESCRIPTOR_BYTES, OutputDirectory, PreparedDevelopment, invalid, prepared_result,
-  recipe_command, run_recipe,
-};
+use super::{OutputDirectory, PreparedDevelopment, invalid, prepared_result};
+use crate::components::macos_runtime::SignedHelper;
 use ctl_core::bundles::{Bundle, Manifest, Source};
 use ctl_core::component::ComponentInfo;
 use ctl_core::installations::{Installations, Lease};
 use ctl_core::private_fs;
-use serde::Serialize;
 use std::io::{self, Write as _};
 use std::path::Path;
 
 const RECEIPT: &str = "ctld-package.json";
 const HELPER: &str = "ctld.app/Contents/MacOS/ctld";
 
-#[derive(Serialize)]
-struct SigningInput<'a> {
-  artifact: &'a Path,
-  target: &'a str,
-  expected_component: &'a ComponentInfo,
-  expected_team: &'a str,
-  output_directory: &'a Path,
+/// Writes and returns the receipt for a staged development `ctld.app`.
+/// The caller must verify the resulting package before using it.
+///
+/// # Errors
+/// Reports an incomplete helper, invalid component identity, or unsafe output.
+pub fn write_development_helper_receipt(
+  output_directory: &Path,
+  component: &ComponentInfo,
+  target: &str,
+  team: &str,
+) -> io::Result<Vec<u8>> {
+  let signed = SignedHelper::read(
+    &output_directory.join("ctld.app"),
+    component,
+    target,
+    team,
+    true,
+  )?;
+  write_private(
+    &output_directory.join("installation.json"),
+    &signed.receipt,
+    false,
+  )?;
+  Ok(signed.receipt)
 }
 
 /// Re-signs the active macOS development helper and selects a verified copy of
 /// its runtime bundle. The active executable is never run during preparation.
+/// The signer receives the staged executable, output app path, app version and
+/// the installed Apple Team ID. After verification, `before_activate` can stop
+/// the transaction if the caller has been interrupted.
 ///
 /// # Errors
 /// Reports missing or modified installations, signing or verification errors,
 /// and concurrent activation of a different build.
-pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<PreparedDevelopment> {
+pub async fn renew_signing(
+  home: &Path,
+  sign: impl AsyncFnOnce(&Path, &Path, &str, &str) -> io::Result<()>,
+  before_activate: impl FnOnce() -> io::Result<()>,
+) -> io::Result<PreparedDevelopment> {
   let installations = Installations::new(home);
   let active = installations.active()?.ok_or_else(|| {
     io::Error::new(
@@ -44,18 +65,6 @@ pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<Prepared
       "The active runtime is not a local development build. Use ctlup sign --version <VERSION> for a CI release.",
     ));
   }
-  let workspace = workspace.canonicalize().map_err(|error| {
-    io::Error::new(
-      error.kind(),
-      format!("could not open the ctl checkout root: {error}"),
-    )
-  })?;
-  let recipe = workspace.join("scripts/dev/ctld-signed.mts");
-  if !recipe.is_file() {
-    return Err(invalid(
-      "Run ctlup sign from a ctl checkout root or pass its path with --workspace.",
-    ));
-  }
   let mut files = active.read_files()?;
   let component = &manifest.components["ctld"];
   let target = &manifest.target_triple;
@@ -65,62 +74,30 @@ pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<Prepared
   let team =
     crate::setup::development_signing_team(receipt, target, component).map_err(io::Error::other)?;
   // Use the verified executable from the signed app. Expiry can prevent even
-  // --component-info from running, so the recipe probes only the signed result.
+  // --component-info from running. Verify the metadata only after signing.
   let original = files
     .remove(HELPER)
     .ok_or_else(|| invalid("the active build has no signed development helper"))?;
   files.retain(|name, _| name != "ctld" && name != RECEIPT && !name.starts_with("ctld.app/"));
 
-  let output = OutputDirectory::new()?;
+  let staging = installations.updater_root().join("staging");
+  crate::installation::safe_directory(&staging)?;
+  let output = staging.join(format!("ctld-renewal-{}", uuid::Uuid::new_v4()));
+  private_fs::create_directory(&output)?;
+  let output = OutputDirectory(output);
   let artifact = output.0.join("ctld");
   write_private(&artifact, &original, true)?;
   drop(original);
-  let helper = output.0.join("helper");
-  let input = output.0.join("renewal.json");
-  let descriptor = serde_json::to_vec(&SigningInput {
-    artifact: &artifact,
-    target,
-    expected_component: component,
-    expected_team: &team,
-    output_directory: &helper,
-  })
-  .map_err(io::Error::other)?;
-  if descriptor.len() > MAX_DESCRIPTOR_BYTES {
-    return Err(invalid("ctld signing input exceeds its size limit"));
-  }
-  write_private(&input, &descriptor, false)?;
-  let mut command = recipe_command(&recipe, &workspace);
-  command
-    .arg("--renew-signing")
-    .arg(&input)
-    .env("TMPDIR", &output.0);
-  run_recipe(command, "ctld signing renewal").await?;
+  let app = output.0.join("ctld.app");
+  sign(&artifact, &app, &component.build.version, &team).await?;
 
-  let receipt =
-    crate::components::read_input(&helper.join("installation.json"), MAX_DESCRIPTOR_BYTES)?;
-  if crate::setup::development_signing_team(&receipt, target, component)
-    .map_err(io::Error::other)?
-    != team
-  {
-    return Err(invalid("renewed helper uses a different Apple Team"));
-  }
   let mut executables = manifest
     .files
     .iter()
     .filter(|(name, info)| info.executable && files.contains_key(*name))
     .map(|(name, _)| name.clone())
     .collect::<Vec<_>>();
-  crate::components::collect_app(
-    &helper,
-    &helper.join("ctld.app"),
-    &mut files,
-    &mut executables,
-  )?;
-  let signed = files
-    .get(HELPER)
-    .ok_or_else(|| invalid("renewal failed to produce a signed helper executable"))?;
-  files.insert("ctld".into(), signed.clone());
-  files.insert(RECEIPT.into(), receipt);
+  SignedHelper::read(&app, component, target, &team, true)?.add_to(&mut files, &mut executables);
   let mut replacement =
     Manifest::new(target, manifest.source, manifest.components.clone(), &files)?
       .with_executables(&executables)?;
@@ -132,6 +109,7 @@ pub async fn renew_signing(home: &Path, workspace: &Path) -> io::Result<Prepared
   let bundle = Bundle::stage(&output.0, &replacement, &files)?;
   drop(files);
   crate::components::verify_local(home, &bundle).await?;
+  before_activate()?;
 
   let (installed, lease) =
     activate(installations, bundle, active.manifest.bundle_id, output).await?;
@@ -171,4 +149,82 @@ fn write_private(path: &Path, bytes: &[u8], executable: bool) -> io::Result<()> 
     private_fs::set_executable(&file)?;
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::remote_bundle::compatibility::tests::Fixture;
+  use ctl_core::bundles::Store;
+  use ctl_core::installations::CatalogOrigin;
+  use std::fs;
+
+  #[tokio::test]
+  async fn failed_renewal_passes_verified_bytes_and_installed_team_to_the_signer() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    let home = OutputDirectory::new().unwrap();
+    let fixture = Fixture::new("0.1.0", &"a".repeat(40)).with_clients();
+    let components: std::collections::BTreeMap<String, ComponentInfo> = serde_json::from_value(
+      fixture.outer["targets"]["aarch64-apple-darwin"]["components"].clone(),
+    )
+    .unwrap();
+    let component = &components["ctld"];
+    let target = ctl_core::paths::native_target();
+    let old_helper = b"#!/bin/sh\nexit 19\n";
+    let mut files = fixture.files;
+    files.insert("ctld".into(), old_helper.to_vec());
+    files.insert(HELPER.into(), old_helper.to_vec());
+    files.insert(
+      RECEIPT.into(),
+      crate::setup::create_runtime_helper_receipt(
+        component,
+        target,
+        "ABCDEFGHIJ",
+        true,
+        "d".repeat(64),
+        1,
+      )
+      .unwrap(),
+    );
+    let manifest = Manifest::new(target, Source::Local, components, &files).unwrap();
+    let pending = Store::cache(&home.0).publish(&manifest, &files).unwrap();
+    let installations = Installations::new(&home.0);
+    let installed = installations
+      .activate_with_origin(
+        &pending,
+        &CatalogOrigin {
+          channel: "local".into(),
+          publication_id: Some("local.test".into()),
+          built_at: None,
+        },
+      )
+      .unwrap();
+    let before = installations.catalog().unwrap();
+
+    let mut staging = None;
+    let error = renew_signing(
+      &home.0,
+      async |artifact, app, version, team| {
+        assert_eq!(version, "0.1.0");
+        assert_eq!(team, "ABCDEFGHIJ");
+        assert_ne!(artifact, installed.directory.join(HELPER));
+        assert_eq!(fs::read(artifact).unwrap(), old_helper);
+        let metadata = fs::metadata(artifact).unwrap();
+        assert!(private_fs::is_private_file(&metadata));
+        assert!(private_fs::is_executable(&metadata));
+        assert_eq!(app, artifact.with_file_name("ctld.app"));
+        assert!(artifact.starts_with(installations.updater_root().join("staging")));
+        staging = artifact.parent().map(Path::to_path_buf);
+        Err(io::Error::other("fixture signing failure"))
+      },
+      || unreachable!("a failed signer must prevent activation"),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.to_string(), "fixture signing failure");
+    assert!(!staging.unwrap().exists());
+    assert_eq!(installations.active().unwrap().unwrap().manifest, manifest);
+    assert_eq!(installations.catalog().unwrap(), before);
+    assert_eq!(installed.read_files().unwrap(), files);
+  }
 }

@@ -423,20 +423,18 @@ Without the profile-authorized application identifier, the Data Protection
 Keychain rejects credential storage and ctmux reports the signing error instead
 of silently weakening the access policy.
 
-For local Touch ID testing with any Apple Account, first run
-`pnpm ctld:provision`. In the Xcode project it opens, select the
-`ctld-provisioning` target, choose your Personal Team under **Signing &
-Capabilities**, and build once. This Xcode project is copied under `target/`,
-so the local team selection does not modify tracked files. Free Personal Team
-profiles expire after seven days; after initial setup the signed-development
-launcher asks Xcode to refresh an expired profile automatically.
+For local Touch ID testing, run `ctlup dev --app` from the checkout root or use
+`ctlup install app --provision` for a downloaded build. If `ctlup` opens the
+shared Xcode project on first use, sign in with your Apple Account, choose your
+Apple Team under **Signing & Capabilities** for the `ctld-provisioning` target, and
+build once. Then rerun the original command. Free Personal Team profiles expire
+after seven days, and `ctlup` asks Xcode to renew them as needed.
 
 The CLI and GUI share this provisioning project and profile discovery.
-From the repository root, `pnpm ctld:build` delegates to `ctlup dev` to prepare
-a complete native installation, including signed `ctld.app`. The manager
-activates the verified build under `~/.tokn/ctl/ctlup/store/runtime/` and exposes stable
-commands in `~/.tokn/ctl/bin`; see the
-[development instructions](../../README.md#build).
+From the repository root, `ctlup dev` prepares a complete native installation,
+including signed `ctld.app`. The manager activates the verified build under
+`~/.tokn/ctl/ctlup/store/runtime/` and exposes stable commands in `~/.tokn/ctl/bin`.
+See the [development instructions](../../README.md#build).
 
 Root `pnpm desktop:dev` delegates preparation to the same manager automatically;
 preparing `ctld:build` separately is unnecessary. During signing, it searches

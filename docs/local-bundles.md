@@ -33,10 +33,18 @@ restart them explicitly when ready to use the replacement.
 The macOS and Linux repository launchers bootstrap `ctlup` when needed and
 delegate preparation to it. `pnpm desktop:dev` does this before each native
 launch, and `pnpm daemons:build` uses the same preparation path on Unix.
-On macOS, `pnpm ctld:build` prepares the same complete native installation for
-CLI work; it is unnecessary before `desktop:dev`. Provision once with
-`pnpm ctld:provision`, choose a team in Xcode, and build the provisioning target.
-Development signing needs no notarization credentials and disables timestamps.
+On macOS, `pnpm ctld:build` prepares the complete native installation for
+CLI work. `ctlup dev`, `ctlup dev --app`, and `ctlup install app --provision`
+use the same Apple Team and profile selection. When `ctlup` opens its shared
+project on first use, sign in to Xcode, select your Apple Team under
+**Signing & Capabilities** for the `ctld-provisioning` target, and build the
+target once. Then rerun the original command. Development signing needs no
+notarization credentials and disables timestamps.
+
+Use `ctlup sign --provision --team` in a terminal to set up or change the Apple
+Team before a build. Press Enter to keep the saved team when prompted. The next
+checkout build uses the selected team. Saved credentials are scoped to the
+signing team's Keychain identity.
 
 Cargo configuration, custom profiles, `CARGO_TARGET_DIR`, and explicit
 `--target-dir` are preserved. The builder consumes Cargo's actual executable
@@ -49,9 +57,8 @@ stops owned build processes; completed activations preserve running services.
 
 ## Renew the active development helper's signature
 
-On macOS, run `ctlup sign` from the checkout root after activating a local
-runtime with `ctlup dev`. To select the checkout explicitly, run
-`ctlup sign --workspace /path/to/checkout`.
+On macOS, run `ctlup sign` from any directory after activating a local runtime
+with `ctlup dev`. Renewal uses the active build and requires no checkout or Node.
 
 Renewal reuses the installed `ctld` executable without compiling. It uses an
 unexpired development provisioning profile for the helper's Apple Team or

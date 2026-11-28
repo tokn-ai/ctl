@@ -267,14 +267,15 @@ using the Node and pnpm versions in [Tests and CI](testing.md). Windows app
 builds also require the matching Rust MSVC toolchain, Visual Studio C++ build
 tools, and the Windows SDK.
 
-On macOS, both development paths look for an unexpired helper provisioning
-profile and can renew it through Xcode when the project has a configured team.
-Runtime activation requires a signed helper. The desktop build can bundle an
-unsigned helper if provisioning or signing fails.
+On macOS, both development paths use the same provisioning flow as
+`ctlup install app --provision`. Follow the setup instructions if `ctlup` opens
+the shared Xcode project on first use. Runtime activation requires a signed
+helper. The desktop build can bundle an unsigned helper if provisioning or
+signing fails.
 
-Run `ctlup sign` from the checkout to renew the active development runtime's
-`ctld` signature using the installed executable. Use `--workspace` to name
-the checkout root explicitly. Restart `ctld` separately to use the renewed helper.
+Run `ctlup sign` from any directory to renew the active development runtime's
+`ctld` signature using the installed executable and its existing Apple Team.
+Restart `ctld` separately to use the renewed helper.
 [Development signing](local-bundles.md#renew-the-active-development-helpers-signature)
 
 Use `ctlup sign --channel nightly` or `ctlup sign --version BUILD_ID` to sign
@@ -283,6 +284,9 @@ and notarize a retained desktop archive. Install the desired build first with
 cached build exports an app archive and DMG and preserves the active app
 selection. Apple notarization contacts Apple's service, and local provisioning
 can also require network access.
+Use `ctlup sign --provision --team` in a terminal to set up or change the team
+for local signing, even before a build is installed. Press Enter to keep the
+saved team when prompted.
 [Release signing](ci-bundles.md#sign-a-ci-built-macos-desktop-release-locally)
 
 The desktop development launcher bootstraps a private native `ctlup` executable

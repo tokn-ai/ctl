@@ -88,23 +88,14 @@ pub(super) fn verify_existing(
   Ok(())
 }
 
-pub(super) fn verify_local_existing(
-  app: &Path,
-  version: &str,
-  mode: SigningMode,
-) -> io::Result<()> {
-  verify_existing(app, version, DesktopSigning::Unsigned)?;
-  verify_local_signature(app, mode, native_architecture()?)
-}
-
 pub(in crate::updater) fn verify_local_signature(
   app: &Path,
   mode: SigningMode,
   arch: &str,
-) -> io::Result<()> {
+) -> io::Result<Option<String>> {
   let helper = app.join(HELPER_PATH);
   let profile = helper.join("Contents/embedded.provisionprofile");
-  match mode {
+  let team = match mode {
     SigningMode::AdHoc => {
       if exists(&profile)? {
         return Err(invalid(
@@ -112,14 +103,15 @@ pub(in crate::updater) fn verify_local_signature(
         ));
       }
       verify_ad_hoc(&helper)?;
+      None
     }
-    SigningMode::Provision => verify_provisioned_helper(&helper, &profile)?,
+    SigningMode::Provision => Some(verify_provisioned_helper(&helper, &profile)?),
     SigningMode::DeveloperId => {
       return Err(invalid(
         "Developer ID builds require notarization verification",
       ));
     }
-  }
+  };
   require_success(
     Command::new("/usr/bin/codesign")
       .args(["--verify", "--deep", "--strict", "--architecture", arch])
@@ -140,7 +132,7 @@ pub(in crate::updater) fn verify_local_signature(
       "local macOS executable architecture verification",
     )?;
   }
-  Ok(())
+  Ok(team)
 }
 
 fn native_architecture() -> io::Result<&'static str> {
@@ -171,7 +163,7 @@ fn signature_details(item: &Path) -> io::Result<Output> {
   )
 }
 
-fn verify_provisioned_helper(helper: &Path, profile: &Path) -> io::Result<()> {
+fn verify_provisioned_helper(helper: &Path, profile: &Path) -> io::Result<String> {
   let signature = signature_details(helper)?;
   let details = String::from_utf8_lossy(&signature.stderr);
   let team = details
@@ -201,7 +193,7 @@ fn verify_provisioned_helper(helper: &Path, profile: &Path) -> io::Result<()> {
       .arg(helper),
     "Apple Development helper signature verification",
   )?;
-  Ok(())
+  Ok(team.to_owned())
 }
 
 pub(super) fn stage_local(
@@ -209,10 +201,11 @@ pub(super) fn stage_local(
   staging: &Path,
   version: &str,
   mode: SigningMode,
-) -> io::Result<PathBuf> {
+) -> io::Result<(PathBuf, Option<String>)> {
   let app = unpack(archive, staging)?;
-  verify_local_existing(&app, version, mode)?;
-  Ok(app)
+  verify_existing(&app, version, DesktopSigning::Unsigned)?;
+  let team = verify_local_signature(&app, mode, native_architecture()?)?;
+  Ok((app, team))
 }
 
 pub(in crate::updater) fn stage(

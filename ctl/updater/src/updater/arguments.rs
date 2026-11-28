@@ -51,6 +51,18 @@ pub(super) enum Command {
   Dev(DevelopmentArguments),
   /// Renew local macOS development signing or sign a cached desktop build.
   Sign(SignArguments),
+  #[cfg(target_os = "macos")]
+  #[command(hide = true)]
+  SignDevelopmentHelper {
+    #[arg(long)]
+    artifact: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    version: String,
+    #[arg(long)]
+    non_interactive: bool,
+  },
   /// Show installed builds, their sources and missing payloads.
   Status(StatusArguments),
   /// Browse available releases and pull request builds.
@@ -324,6 +336,9 @@ pub(super) struct StatusArguments {
 pub(super) struct SignArguments {
   #[command(flatten)]
   pub signing: SigningArguments,
+  /// Choose and provision an Apple Team for future signing.
+  #[arg(long, requires = "provision", conflicts_with_all = ["cached_desktop", "target", "workspace", "ad_hoc"])]
+  pub team: bool,
   /// Select a cached desktop build by its exact build ID.
   #[arg(long, group = "cached_desktop")]
   pub version: Option<String>,
@@ -333,7 +348,7 @@ pub(super) struct SignArguments {
   /// macOS Rust target of the cached build. Defaults to the current architecture.
   #[arg(long, requires = "cached_desktop", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
   pub target: Option<String>,
-  /// Checkout containing the development signer. Defaults to the current directory.
+  /// Retained for compatibility when renewing a checkout build.
   #[arg(long, conflicts_with_all = ["cached_desktop", "provision", "ad_hoc"])]
   pub workspace: Option<PathBuf>,
   /// Output the result as JSON.
@@ -588,6 +603,35 @@ mod tests {
       &["--channel", "stable", "--workspace", "checkout"],
     ] {
       assert!(Arguments::try_parse_from([&["ctlup", "sign"], options].concat()).is_err());
+    }
+  }
+
+  #[test]
+  fn team_option_only_prepares_development_provisioning() {
+    let args = Arguments::try_parse_from(["ctlup", "sign", "--provision", "--team"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Sign(SignArguments { team: true, .. })
+    ));
+    for args in [
+      &["sign", "--team"][..],
+      &["sign", "--ad-hoc", "--team"],
+      &["sign", "--team", "--workspace", "checkout"],
+      &[
+        "sign",
+        "--provision",
+        "--team",
+        "--target",
+        "aarch64-apple-darwin",
+      ],
+      &["sign", "--provision", "--team", "--channel", "nightly"],
+      &["sign", "--provision", "--team", "--version", "0.1.5"],
+      &["provision-ctld"],
+    ] {
+      assert!(
+        Arguments::try_parse_from(std::iter::once("ctlup").chain(args.iter().copied())).is_err(),
+        "invalid team setup arguments were accepted: {args:?}"
+      );
     }
   }
 }

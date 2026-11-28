@@ -22,9 +22,14 @@ impl Drop for Home {
 async fn local_source_install_pins_a_checkout_and_repairs_from_its_archive() {
   let home = Home::new();
   let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-  install_development(&home.0, &checkout, false)
-    .await
-    .unwrap();
+  install_development(
+    &home.0,
+    &checkout,
+    ctl_client::development::DesktopHelperSigning::Automatic,
+    false,
+  )
+  .await
+  .unwrap();
   let store = Installations::new(&home.0);
   let selection = store.desktop_selection().unwrap().unwrap();
   assert_eq!(selection.source, DesktopSource::Checkout);

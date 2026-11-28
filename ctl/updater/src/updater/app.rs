@@ -188,13 +188,15 @@ pub(super) fn with_current_launch_entry<T>(
 pub(super) async fn install_development(
   home: &Path,
   workspace: &Path,
+  signing: ctl_client::development::DesktopHelperSigning<'_>,
   json: bool,
 ) -> io::Result<()> {
   let work = activation::Workspace::begin(home)?;
   let current = work.installations().desktop_selection()?;
   eprintln!("Building the ctmux desktop app from local source…");
   let built =
-    ctl_client::development::build_desktop(workspace, &work.staging().join("local-build")).await?;
+    ctl_client::development::build_desktop(workspace, &work.staging().join("local-build"), signing)
+      .await?;
   let mut metadata = DesktopMetadata::provided(DesktopTarget::native()?);
   metadata.app_version = Some(built.app_version);
   metadata.bundle_id = Some(built.bundle_id);
@@ -740,19 +742,22 @@ fn prepare_payload(staging: &Path, package: &CachedPackage) -> io::Result<Deskto
           DesktopSigning::Unsigned
         },
       )?,
-      Signing::Provisioned | Signing::AdHoc => macos::stage_local(
-        &package.archive,
-        staging,
-        metadata
-          .app_version
-          .as_deref()
-          .ok_or_else(|| invalid("desktop metadata has no version"))?,
-        if metadata.signing == Signing::Provisioned {
-          SigningMode::Provision
-        } else {
-          SigningMode::AdHoc
-        },
-      )?,
+      Signing::Provisioned | Signing::AdHoc => {
+        macos::stage_local(
+          &package.archive,
+          staging,
+          metadata
+            .app_version
+            .as_deref()
+            .ok_or_else(|| invalid("desktop metadata has no version"))?,
+          if metadata.signing == Signing::Provisioned {
+            SigningMode::Provision
+          } else {
+            SigningMode::AdHoc
+          },
+        )?
+        .0
+      }
       Signing::NotApplicable => return Err(invalid("macOS desktop package has no signing mode")),
     };
     if metadata.app_version.is_none() {

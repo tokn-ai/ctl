@@ -2,7 +2,7 @@ use super::{
   CachedPackage, DesktopMetadata, DesktopSigning, DesktopTarget, Signing, activation::Workspace,
   invalid, macos, package_digest, report_json,
 };
-use crate::updater::sign::{self, DesktopInput, SigningMode};
+use crate::updater::sign::{self, DesktopInput, DesktopSigningOptions, SigningMode};
 use ctl_client::cli::Channel;
 use ctl_client::remote_bundle::BundleSet;
 use ctl_core::private_fs;
@@ -44,8 +44,19 @@ pub(super) async fn prepare_signing(
     package.metadata.signing_mode = Some(mode);
     return Ok(package);
   }
+  let profile = if mode == SigningMode::Provision && sign::has_profile_override() {
+    Some(sign::select_provisioning(home, false, interactive).await?)
+  } else {
+    None
+  };
+  let team = match &profile {
+    Some(profile) => Some(profile.team.clone()),
+    None if mode == SigningMode::Provision => sign::preferred_team(home)?,
+    None => None,
+  };
   if let Some(source) = &package.metadata.signed_from {
-    if package.metadata.signing == Signing::from(mode) && verified_for_reuse(work, &package, mode)?
+    if package.metadata.signing == Signing::from(mode)
+      && verified_for_reuse(work, &package, mode, team.as_deref())?
     {
       return Ok(package);
     }
@@ -61,7 +72,7 @@ pub(super) async fn prepare_signing(
   }
   work.cache(&package)?;
   if let Some(mut signed) = work.cached_signed_derivative(&package, mode)?
-    && verified_for_reuse(work, &signed, mode)?
+    && verified_for_reuse(work, &signed, mode, team.as_deref())?
   {
     signed.naming = package.naming;
     signed.metadata.signing_mode = Some(mode);
@@ -75,8 +86,11 @@ pub(super) async fn prepare_signing(
     version,
     target,
     work.staging(),
-    mode,
-    interactive,
+    DesktopSigningOptions {
+      mode,
+      interactive,
+      profile: profile.as_ref(),
+    },
   )
   .await?;
   let digest = package_digest(&archive)?;
@@ -99,6 +113,7 @@ fn verified_for_reuse(
   work: &Workspace,
   package: &CachedPackage,
   mode: SigningMode,
+  team: Option<&str>,
 ) -> io::Result<bool> {
   if mode == SigningMode::DeveloperId {
     return Ok(true);
@@ -110,7 +125,7 @@ fn verified_for_reuse(
     version,
     mode,
   ) {
-    Ok(_) => Ok(true),
+    Ok((_, signed_team)) => Ok(team.is_none_or(|team| signed_team.as_deref() == Some(team))),
     Err(error) if error.kind() == io::ErrorKind::TimedOut => Ok(false),
     Err(error) => Err(error),
   }

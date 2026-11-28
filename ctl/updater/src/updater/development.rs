@@ -36,11 +36,19 @@ pub(super) async fn run(home: &Path, options: DevelopmentArguments) -> io::Resul
     return super::ctream::install_development(home, &workspace, &options).await;
   }
   let lease_input = options.lease.then(lease_pipe).transpose()?;
+  let cargo_args = cargo_arguments(&options)?;
+  #[cfg(target_os = "macos")]
+  let profile = super::sign::checkout_profile(home, !options.json && !options.lease).await?;
+  #[cfg(target_os = "macos")]
+  let provisioning_profile = profile.as_ref().map(|profile| profile.path.clone());
+  #[cfg(not(target_os = "macos"))]
+  let provisioning_profile = None;
   let installation = ctl_client::development::install(
     home,
     ctl_client::development::DevelopmentOptions {
       workspace,
-      cargo_args: cargo_arguments(&options)?,
+      cargo_args,
+      provisioning_profile,
     },
   );
   let input = async {
@@ -128,8 +136,26 @@ fn checkout_root(explicit: Option<&Path>, required: &[&str]) -> io::Result<PathB
 async fn install_app(home: &Path, workspace: &Path, json: bool) -> io::Result<()> {
   #[cfg(any(target_os = "macos", target_os = "linux", windows))]
   {
+    use ctl_client::development::DesktopHelperSigning;
+    #[cfg(target_os = "macos")]
+    let profile = match super::sign::checkout_profile(home, !json).await {
+      Ok(profile) => Ok(profile),
+      Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+      Err(error) => Err(error),
+    };
+    #[cfg(target_os = "macos")]
+    let signing = match &profile {
+      Ok(Some(profile)) => DesktopHelperSigning::Profile(&profile.path),
+      Ok(None) => DesktopHelperSigning::Automatic,
+      Err(error) => {
+        eprintln!("ctlup: using an unsigned ctld for the desktop build: {error}");
+        DesktopHelperSigning::Unsigned
+      }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let signing = DesktopHelperSigning::Automatic;
     tokio::select! {
-      result = super::app::install_development(home, workspace, json) => result,
+      result = super::app::install_development(home, workspace, signing, json) => result,
       _ = tokio::signal::ctrl_c() => Err(io::Error::new(
         io::ErrorKind::Interrupted,
         "Desktop development build cancelled.",

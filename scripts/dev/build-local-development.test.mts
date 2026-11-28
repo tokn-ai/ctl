@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -8,16 +8,17 @@ import { basename, delimiter, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { componentMapFixture } from "../ci/agent-bundle.fixtures.mts";
 import { agentCargoPackages, agentComponents } from "../shared/agent-bundle.mts";
 import { buildLocalDevelopment, type LocalDevelopmentOptions } from "./build-local-development.mts";
-import type { MacosCommandContext, MacosCommandRunner } from "./macos-provisioning.mts";
+import type { BuildCommandContext, BuildCommandRunner } from "./build-command.mts";
 
-const execute = promisify(execFile);
 const names = [...agentComponents, "ctlup"] as const;
 
-async function fixture(t: TestContext, settings: { host?: string; target?: string; native_target?: string; mixed?: boolean; missing?: boolean; failed?: boolean } = {}) {
+async function fixture(t: TestContext, settings: {
+  host?: string; target?: string; native_target?: string; mixed?: boolean; missing?: boolean;
+  failed?: boolean; signing_failure?: boolean;
+} = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctlup-native-builder-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace"), output = join(root, "output"), home = join(root, "home");
@@ -25,6 +26,7 @@ async function fixture(t: TestContext, settings: { host?: string; target?: strin
   for (const directory of [workspace, output, home]) await mkdir(directory, { mode: 0o700 });
   await mkdir(cargo_cwd, { recursive: true });
   const profile = join(root, "profile");
+  const signer = join(root, "fixture ctlup");
   await writeFile(profile, "fixture provisioned profile");
   const host = settings.host ?? "x86_64-unknown-linux-gnu", target = settings.target ?? host;
   const checkout_id = createHash("sha256").update(workspace).digest("hex").slice(0, 20);
@@ -34,8 +36,8 @@ async function fixture(t: TestContext, settings: { host?: string; target?: strin
   if (settings.mixed) components["ctl-taskd"].build.source_fingerprint = "b".repeat(64);
   let stripped = false, changed_originals = false;
   const original_paths: string[] = [];
-  const calls: { command: string; args: string[]; context: MacosCommandContext }[] = [];
-  const run: MacosCommandRunner = async (command, args, context) => {
+  const calls: { command: string; args: string[]; context: BuildCommandContext }[] = [];
+  const run: BuildCommandRunner = async (command, args, context) => {
     calls.push({ command, args, context });
     const empty = { stdout: "", stderr: "" };
     if (command === "fixture-rustc") return { stdout: `host: ${host}\n`, stderr: "" };
@@ -80,40 +82,36 @@ async function fixture(t: TestContext, settings: { host?: string; target?: strin
         changed_originals = true;
         for (const path of original_paths) await writeFile(path, "concurrent Cargo replacement");
       }
-      const name = basename(command) === ".ctld-input" ? "ctld" : basename(command);
+      const name = basename(command);
       return { stdout: JSON.stringify(components[name === "ctlup" ? "ctl" : name as keyof typeof components]), stderr: "" };
     }
-    if (command === "security") return empty;
-    if (command === "/usr/libexec/PlistBuddy") return { stdout: args[1]?.endsWith(":ExpirationDate") ? "2099-01-01T00:00:00Z" : "TEAM123ABC.dev.tokn-ai.ctl.ctld", stderr: "" };
-    if (command === "/bin/sh") {
-      assert.ok(stripped, "strip precedes codesigning");
-      assert.equal(context.env.CTLD_SIGNING_TIMESTAMP, "none");
-      assert.equal(context.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING, "false");
-      const app = args[2]!;
+    if (command === signer) {
+      assert.ok(stripped, "strip precedes signing");
+      const artifact = join(output, "bin/ctld"), helper = join(output, "helper");
+      assert.deepEqual(args, ["sign-development-helper", "--artifact", artifact,
+        "--output", helper, "--version", "0.1.0", "--non-interactive"]);
+      assert.equal(context.cwd, workspace);
+      assert.equal(context.stream_stderr, true);
+      assert.equal(context.env.CTLD_PROVISIONING_PROFILE, profile);
+      assert.equal(context.env.CTLD_SIGNING_TIMESTAMP, undefined);
+      assert.equal(context.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING, undefined);
+      if (settings.signing_failure) throw new Error("fixture ctlup signing failed");
+      const app = join(helper, "ctld.app");
       await mkdir(join(app, "Contents/MacOS"), { recursive: true });
-      await mkdir(join(app, "Contents/_CodeSignature"));
-      await copyFile(args[1]!, join(app, "Contents/MacOS/ctld"));
-      await chmod(join(app, "Contents/MacOS/ctld"), 0o700);
-      await copyFile(profile, join(app, "Contents/embedded.provisionprofile"));
-      await writeFile(join(app, "Contents/Info.plist"), "fixture plist");
-      await writeFile(join(app, "Contents/_CodeSignature/CodeResources"), "fixture seal");
-      await writeFile(context.env.CTLD_SIGNING_IDENTITY_OUTPUT!, "A".repeat(40));
+      await copyFile(artifact, join(app, "Contents/MacOS/ctld"));
+      await writeFile(join(helper, "installation.json"), JSON.stringify({
+        target, signing_mode: "development", development: { dirty: true },
+      }));
       return empty;
     }
-    if (command === "lipo") {
-      assert.equal(args[2], target.startsWith("aarch64") ? "arm64" : "x86_64");
-      return empty;
-    }
-    if (command === "codesign") return args.includes("-d") ? { stdout: "", stderr: "TeamIdentifier=TEAM123ABC\n" } : empty;
-    if (command === "env") return execute(command, args);
     throw new Error(`unexpected fixture command: ${command}`);
   };
   const options: LocalDevelopmentOptions = { workspace, output, cargo_cwd, native_target: settings.native_target,
     cargo_args: ["run", "--manifest-path", "Cargo.toml", "--target-dir", target_directory, "--profile", "custom-profile", "--target", target,
       "--config", "config with spaces.toml", "--features", "app-only", "--bin", "desktop", "--", "--app-only"],
     env: { ...process.env, HOME: home, CARGO_TARGET_DIR: "inherited Cargo target", RUSTC: "fixture-rustc", CTLD_PROVISIONING_PROFILE: profile,
-      CTL_BUNDLED_CTLD_DIR: "unrelated release payload", CTLD_SIGNING_TIMESTAMP: "secure" } };
-  return { root, workspace, output, home, cargo_cwd, target_directory, dedicated, calls, original_paths, run, options };
+      CTL_BUNDLED_CTLD_DIR: "unrelated release payload", CTLD_SIGNING_TIMESTAMP: "secure", CTLUP_DEVELOPMENT_EXECUTABLE: signer } };
+  return { root, workspace, output, home, cargo_cwd, target_directory, dedicated, calls, original_paths, run, options, signer };
 }
 
 test("one native build snapshots all runtime commands and ctlup from Cargo's actual custom target/profile outputs", async (t) => {
@@ -136,7 +134,7 @@ test("one native build snapshots all runtime commands and ctlup from Cargo's act
   await assert.rejects(lstat(join(input.target_directory, "ctl-dev/helpers")), { code: "ENOENT" });
 });
 
-test("an executable Darwin target is stripped before the existing signing recipe and emits a native-verifier receipt", async (t) => {
+test("a Darwin target is stripped before passing its helper to the launching updater", async (t) => {
   const input = await fixture(t, { host: "aarch64-apple-darwin", target: "x86_64-apple-darwin", native_target: "x86_64-apple-darwin" });
   const result = await buildLocalDevelopment(input.options, input.run);
   assert.equal(result.target_triple, "x86_64-apple-darwin");
@@ -148,8 +146,14 @@ test("an executable Darwin target is stripped before the existing signing recipe
   assert.deepEqual((await readdir(result.ctld_package!)).sort(), ["ctld.app", "installation.json"]);
   assert.equal(await readFile(join(result.ctld_package!, "ctld.app/Contents/MacOS/ctld"), "utf8"), "compiled ctld:stripped");
   assert.equal(input.calls.filter((call) => call.command === "cargo" && call.args[0] === "build").length, 1);
-  assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 1);
+  assert.equal(input.calls.filter((call) => call.command === input.signer).length, 1);
   assert.deepEqual(await readdir(input.home), []);
+});
+
+test("a failed updater signing operation leaves native build results unpublished", async (t) => {
+  const input = await fixture(t, { host: "aarch64-apple-darwin", signing_failure: true });
+  await assert.rejects(buildLocalDevelopment(input.options, input.run), /fixture ctlup signing failed/);
+  await assert.rejects(readFile(join(input.output, "result.json")), { code: "ENOENT" });
 });
 
 for (const [name, settings] of [
@@ -164,7 +168,7 @@ for (const [name, settings] of [
     await assert.rejects(buildLocalDevelopment(input.options, input.run));
     await assert.rejects(readFile(join(input.output, "result.json")), { code: "ENOENT" });
     assert.deepEqual(await readdir(input.home), []);
-    assert.equal(input.calls.some((call) => call.command === "/bin/sh"), false);
+    assert.equal(input.calls.some((call) => call.command === input.signer), false);
     if ("target" in settings) assert.equal(input.calls.some((call) => call.command === "strip"), false);
   });
 }

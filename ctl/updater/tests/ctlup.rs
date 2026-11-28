@@ -808,6 +808,31 @@ fn signing_without_a_cached_desktop_explains_local_preparation() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn team_setup_reaches_provisioning_without_a_build() {
+  let home = Home::new();
+  let settings = home.updater_root().join("signing");
+  fs::create_dir_all(&settings).unwrap();
+  let preference = settings.join("provisioning-team");
+  fs::write(&preference, b"invalid\n").unwrap();
+  fs::set_permissions(&preference, fs::Permissions::from_mode(0o600)).unwrap();
+
+  let output = home
+    .command(&["sign", "--provision", "--team", "--json"])
+    .output()
+    .unwrap();
+  let diagnostics = String::from_utf8_lossy(&output.stderr);
+  assert!(!output.status.success());
+  assert!(
+    diagnostics.contains("invalid saved Apple Team selection"),
+    "{diagnostics}"
+  );
+  assert_eq!(fs::read(preference).unwrap(), b"invalid\n");
+  assert!(!home.registry().exists());
+  assert!(!home.updater_root().join("cache/downloads/desktop").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn signing_without_a_desktop_preserves_an_active_runtime_installation() {
   let home = Home::new();
   let (_, bytes) = archive('a');
@@ -908,10 +933,9 @@ fn development_payload() -> (Manifest, BTreeMap<String, Vec<u8>>) {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn failed_development_signing_passes_verified_input_and_preserves_the_installation() {
+fn development_signing_uses_native_provisioning_without_a_checkout() {
   use ctl_core::bundles::Store;
   use ctl_core::installations::{CatalogOrigin, Installations};
-  use sha2::{Digest as _, Sha256};
 
   let home = Home::new();
   let (_, bytes) = archive('a');
@@ -935,25 +959,11 @@ fn failed_development_signing_passes_verified_input_and_preserves_the_installati
   let catalog_path = home.registry();
   let catalog = fs::read(&catalog_path).unwrap();
 
-  let workspace = home.0.join("checkout with spaces");
-  fs::create_dir_all(workspace.join("scripts/dev")).unwrap();
-  fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
-  fs::write(workspace.join("scripts/dev/ctld-signed.mts"), []).unwrap();
   let signer = home.0.join("signer");
   fs::write(
     &signer,
     r#"#!/bin/sh
-set -eu
-test "$#" -eq 5
-test "$3" = "$(pwd -P)/scripts/dev/ctld-signed.mts"
-test "$4" = --renew-signing
-test "$TMPDIR" = "$(dirname "$5")"
-mkdir "$TMPDIR/fixture-signing-scratch"
-artifact=$(/usr/bin/plutil -extract artifact raw -o - "$5")
-test -x "$artifact"
-cp "$5" "$HOME/signing-input.json"
-cp "$artifact" "$HOME/staged-ctld"
-printf 'fixture signing failure\n' >&2
+touch "$HOME/node-executed"
 exit 17
 "#,
   )
@@ -961,9 +971,12 @@ exit 17
   fs::set_permissions(&signer, fs::Permissions::from_mode(0o700)).unwrap();
   let output = home
     .command(&["sign", "--json"])
-    .current_dir(&workspace)
+    .current_dir(&home.0)
     .env("CTL_NODE_PROGRAM", &signer)
-    .env_remove("CTLD_PROVISIONING_PROFILE")
+    .env(
+      "CTLD_PROVISIONING_PROFILE",
+      home.0.join("missing.provisionprofile"),
+    )
     .env_remove("APPLE_API_KEY_PATH")
     .env_remove("APPLE_API_KEY")
     .env_remove("APPLE_API_ISSUER")
@@ -971,29 +984,9 @@ exit 17
     .unwrap();
   let diagnostics = String::from_utf8_lossy(&output.stderr);
   assert!(!output.status.success());
-  assert!(
-    diagnostics.contains("fixture signing failure"),
-    "{diagnostics}"
-  );
+  assert!(!diagnostics.contains("ctl checkout root"), "{diagnostics}");
   assert_eq!(output.stdout, [] as [u8; 0]);
-  let request: serde_json::Value =
-    serde_json::from_slice(&fs::read(home.0.join("signing-input.json")).unwrap()).unwrap();
-  assert_eq!(request["target"], manifest.target_triple);
-  assert_eq!(request["expected_team"], "ABCDEFGHIJ");
-  assert_eq!(
-    request["expected_component"],
-    serde_json::to_value(&manifest.components["ctld"]).unwrap()
-  );
-  let helper = "ctld.app/Contents/MacOS/ctld";
-  let artifact = PathBuf::from(request["artifact"].as_str().unwrap());
-  assert_ne!(artifact, installed.directory.join(helper));
-  assert!(!artifact.parent().unwrap().exists());
-  assert_eq!(
-    hex::encode(Sha256::digest(
-      fs::read(home.0.join("staged-ctld")).unwrap()
-    )),
-    manifest.files[helper].sha256
-  );
+  assert!(!home.0.join("node-executed").exists());
   assert!(!home.0.join("helper-executed").exists());
   assert_eq!(installations.active().unwrap().unwrap().manifest, manifest);
   assert!(installations.previous().unwrap().is_none());

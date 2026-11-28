@@ -196,8 +196,11 @@ mod tests {
       VERSION,
       target,
       &fixture.root,
-      SigningMode::AdHoc,
-      false,
+      super::super::DesktopSigningOptions {
+        mode: SigningMode::AdHoc,
+        interactive: false,
+        profile: None,
+      },
     )
     .await
     .unwrap();

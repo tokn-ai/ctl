@@ -14,10 +14,11 @@ mod provisioning;
 use macos::Runner;
 #[cfg(target_os = "macos")]
 pub(super) use macos::{
-  export_desktop, sign_ad_hoc_executable, sign_for_install, sign_runtime_helper,
+  DesktopSigningOptions, checkout_profile, export_desktop, select_provisioning,
+  sign_ad_hoc_executable, sign_checkout_helper, sign_for_install, sign_runtime_helper,
 };
 #[cfg(target_os = "macos")]
-pub(super) use provisioning::verify_embedded_profile;
+pub(super) use provisioning::{has_profile_override, preferred_team, verify_embedded_profile};
 
 /// Local macOS signing policy. The default is required for distribution.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

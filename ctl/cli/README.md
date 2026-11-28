@@ -265,17 +265,17 @@ compatible daemons and passive status reads are preserved. A dedicated
 [build/release command](https://github.com/tokn-ai/ctl/blob/main/docs/ci-bundles.md#build-a-cli-with-ctld-embedded)
 compiles and bundles the helper; ordinary Cargo installation does not embed it.
 
-For local macOS development, use the shared Xcode provisioning flow from a checkout:
+Run `ctlup dev` from the checkout root to prepare a native macOS build.
 
 ```sh
-pnpm ctld:provision
-# Choose your team in Xcode and build the provisioning target once.
-pnpm ctld:build
+ctlup dev
 ~/.tokn/ctl/bin/ctl passwords
 ~/.tokn/ctl/bin/ctlup status --json
 ```
 
-The command bootstraps `ctlup` and delegates to `ctlup dev`. The manager builds
+If `ctlup` opens the shared Xcode project on first use, choose your Apple Team
+under **Signing & Capabilities**, build the provisioning target once, and
+rerun `ctlup dev`. The manager builds
 the complete native command set, signs the copied `ctld.app`, and activates one
 verified installation under `~/.tokn/ctl/ctlup/store/runtime/`. Stable commands live in
 `~/.tokn/ctl/bin`. This uses the same active selection as other `ctlup` updates,

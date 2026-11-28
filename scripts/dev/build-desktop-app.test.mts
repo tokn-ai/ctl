@@ -10,40 +10,25 @@ import { componentMapFixture } from "../ci/agent-bundle.fixtures.mts";
 import { extractWindowsPortableFixture, windowsExecutableFixture } from "../shared/windows-portable.fixtures.mts";
 import { buildDesktopApp, runDesktopBuildCommand, type DesktopBuildOptions } from "./build-desktop-app.mts";
 import type { buildDaemons } from "./daemon-build.mts";
-import type { MacosCommandRunner } from "./macos-provisioning.mts";
+import type { BuildCommandRunner } from "./build-command.mts";
 
 const execute = promisify(execFile);
 
 async function fixture(t: TestContext, settings: {
-  target?: string; profile?: boolean; output?: "missing" | "failed"; mixed_version?: boolean;
-  signing_failure?: boolean; invalid_helper?: boolean; configured_project?: boolean;
-  profile_expired?: boolean; renewal_failure?: boolean; profile_from_home?: boolean;
+  target?: string; output?: "missing" | "failed"; mixed_version?: boolean;
+  signing?: "unavailable" | "partial" | "skip"; invalid_helper?: boolean;
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctl-desktop-source-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const workspace = join(root, "workspace"), output = join(root, "output"), home = join(root, "home");
+  const workspace = join(root, "workspace"), output = join(root, "output"), signer = join(root, "fixture ctlup");
   const target_directory = join(root, "custom Cargo cache"), native = settings.target ?? "x86_64-unknown-linux-gnu";
   const config_directory = join(workspace, "apps/desktop/src-tauri");
-  for (const directory of [workspace, output, home]) await mkdir(directory, { mode: 0o700 });
+  for (const directory of [workspace, output]) await mkdir(directory, { mode: 0o700 });
   await mkdir(config_directory, { recursive: true });
   await mkdir(join(config_directory, "resources/agent-bundles"), { recursive: true });
   await writeFile(join(config_directory, "tauri.conf.json"), JSON.stringify({
     productName: "ctmux", version: settings.mixed_version ? "0.1.1" : "0.1.0",
   }));
-  const profile = settings.profile_from_home
-    ? join(home, "Library/Developer/Xcode/UserData/Provisioning Profiles/fixture.provisionprofile")
-    : join(root, "profile");
-  let profile_available = settings.profile ?? false;
-  let profile_expired = settings.profile_expired ?? false;
-  if (profile_available) {
-    await mkdir(dirname(profile), { recursive: true });
-    await writeFile(profile, "fixture provisioning profile");
-  }
-  const provisioning_project = join(target_directory, "ctld-provisioning/ctld-provisioning.xcodeproj");
-  if (settings.configured_project) {
-    await mkdir(provisioning_project, { recursive: true });
-    await writeFile(join(provisioning_project, "project.pbxproj"), "DEVELOPMENT_TEAM = TEAM123ABC;");
-  }
   const checkout = createHash("sha256").update(workspace).digest("hex").slice(0, 20);
   const cache = join(target_directory, "ctl-desktop-build", checkout, "cargo");
   const macos = native.endsWith("-apple-darwin");
@@ -68,7 +53,7 @@ async function fixture(t: TestContext, settings: {
     }
     return result;
   };
-  const run: MacosCommandRunner = async (command, args, context) => {
+  const run: BuildCommandRunner = async (command, args, context) => {
     calls.push({ command, args });
     const empty = { stdout: "", stderr: "" };
     if (command === "cargo" && args[0] === "metadata") {
@@ -77,54 +62,38 @@ async function fixture(t: TestContext, settings: {
         packages: [{ name: "ctmux-app", version: "0.1.0" }] }), stderr: "" };
     }
     if (command === "fixture-rustc") return { stdout: `host: ${native}\n`, stderr: "" };
-    if (command === "security") {
-      assert.equal(args[args.indexOf("-i") + 1], profile);
-      if (!profile_available) throw new Error("fixture profile unavailable");
-      return empty;
-    }
-    if (command === "/usr/libexec/PlistBuddy") {
-      const expiration = profile_expired ? "2000-01-01T00:00:00Z" : "2099-01-01T00:00:00Z";
-      return { stdout: args[1]!.endsWith(":ExpirationDate") ? expiration :
-        "TEAM123ABC.dev.tokn-ai.ctl.ctld", stderr: "" };
-    }
-    if (command === "xcodebuild") {
-      assert.ok(settings.configured_project);
-      assert.equal(args[args.indexOf("-project") + 1], provisioning_project);
-      assert.ok(args.includes("-allowProvisioningUpdates"));
-      assert.ok(args.includes("-allowProvisioningDeviceRegistration"));
-      if (settings.renewal_failure) throw new Error("fixture Xcode provisioning refresh failed");
-      profile_available = true;
-      profile_expired = false;
-      await mkdir(dirname(profile), { recursive: true });
-      await writeFile(profile, "renewed fixture provisioning profile");
-      return empty;
-    }
     if (args[0] === "--component-info") {
       const component = componentMapFixture().ctld;
       if (settings.invalid_helper) component.build.version = "0.0.0";
       return { stdout: JSON.stringify(component), stderr: "" };
     }
+    if (command === signer) {
+      const artifact = join(output, "binaries", `ctld-${native}`), helper = join(output, "helper");
+      assert.deepEqual(args, ["sign-development-helper", "--artifact", artifact,
+        "--output", helper, "--version", "0.1.0", "--non-interactive"]);
+      if (settings.signing === "unavailable") throw new Error("fixture provisioning unavailable");
+      const app = join(helper, "ctld.app");
+      await mkdir(join(app, "Contents/MacOS"), { recursive: true });
+      await mkdir(join(app, "Contents/_CodeSignature"));
+      await copyFile(artifact, join(app, "Contents/MacOS/ctld"));
+      await writeFile(join(app, "Contents/Info.plist"), "fixture helper metadata");
+      await writeFile(join(app, "Contents/embedded.provisionprofile"), "fixture profile");
+      await writeFile(join(app, "Contents/_CodeSignature/CodeResources"), "fixture signature");
+      await writeFile(join(helper, "installation.json"), JSON.stringify({ signing_mode: "development" }));
+      if (settings.signing === "partial") throw new Error("fixture signing failed after staging");
+      return empty;
+    }
     if (command === "/bin/sh") {
       assert.equal(context.env.CTLD_REQUIRE_DISTRIBUTION_SIGNING, "false");
       assert.equal(context.env.CTLD_SIGNING_TIMESTAMP, "none");
-      const signed = context.env.CTLD_PROVISIONING_PROFILE !== undefined;
-      assert.equal(context.env.CTLD_PROVISIONING_PROFILE, signed ? profile : undefined);
+      assert.equal(context.env.CTLD_PROVISIONING_PROFILE, undefined);
       const app = args[2]!;
       await mkdir(join(app, "Contents/MacOS"), { recursive: true });
       await copyFile(args[1]!, join(app, "Contents/MacOS/ctld"));
       await writeFile(join(app, "Contents/Info.plist"), "fixture helper metadata");
-      if (signed) {
-        await mkdir(join(app, "Contents/_CodeSignature"));
-        await writeFile(join(app, "Contents/_CodeSignature/CodeResources"), "fixture signature");
-        await copyFile(profile, join(app, "Contents/embedded.provisionprofile"));
-        if (settings.signing_failure) throw new Error("fixture matching signing identity unavailable");
-        await writeFile(context.env.CTLD_SIGNING_IDENTITY_OUTPUT!, "A".repeat(40));
-      }
       return empty;
     }
-    if (command === "codesign") return args.includes("-d") ? { stdout: "", stderr: "TeamIdentifier=TEAM123ABC\n" } : empty;
-    if (command === "lipo") return empty;
-    if (command === "env" || command === "tar") return execute(command, args, { cwd: context.cwd, env: context.env });
+    if (command === "tar") return execute(command, args, { cwd: context.cwd, env: context.env });
     if (command === "pnpm") {
       assert.equal(context.env.CARGO_TARGET_DIR, cache);
       assert.equal(context.env.CTL_DESKTOP_BUILD_CHANNEL, "local");
@@ -162,10 +131,10 @@ async function fixture(t: TestContext, settings: {
     }
     throw new Error(`unexpected command ${command}`);
   };
-  const options: DesktopBuildOptions = { workspace, output, home_directory: home,
+  const options: DesktopBuildOptions = { workspace, output,
     env: { ...process.env, RUSTC: "fixture-rustc", CARGO_TARGET_DIR: target_directory, CTL_DESKTOP_BUILD_CHANNEL: "nightly",
-      CTLD_PROVISIONING_PROFILE: settings.profile_from_home ? undefined : profile } };
-  return { options, run, build, calls };
+      CTLUP_DEVELOPMENT_EXECUTABLE: signer, CTLUP_SKIP_DEVELOPMENT_SIGNING: settings.signing === "skip" ? "1" : undefined } };
+  return { options, run, build, calls, signer };
 }
 
 test("local desktop builds native daemons and a fresh debug AppImage into private staging", async (t) => {
@@ -179,53 +148,17 @@ test("local desktop builds native daemons and a fresh debug AppImage into privat
   assert.deepEqual(input.calls.filter((call) => call.command === "pnpm").map((call) => call.args.slice(0, 2)), [["--workspace-root", "desktop:build"]]);
 });
 
-test("macOS reuses an available provisioning profile for its helper and leaves GUI signing optional", async (t) => {
-  for (const profile of [false, true]) {
-    const input = await fixture(t, { target: "aarch64-apple-darwin", profile, configured_project: profile });
+test("macOS delegates helper signing to ctlup and leaves GUI signing optional", async (t) => {
+  for (const signing of [undefined, "unavailable", "skip"] as const) {
+    const input = await fixture(t, { target: "aarch64-apple-darwin", signing });
     const result = await buildDesktopApp(input.options, input.run, input.build);
     assert.equal(result.archive, "ctmux.app.tar.gz");
     const listing = await execute("tar", ["-tzf", join(input.options.output, result.archive)]);
     assert.match(listing.stdout, /ctmux.app\/Contents\/Helpers\/ctld.app\/Contents\/MacOS\/ctld/);
-    assert.equal(listing.stdout.includes("embedded.provisionprofile"), profile);
-    assert.equal(input.calls.some((call) => call.command === "codesign"), profile);
-    assert.equal(input.calls.some((call) => call.command === "xcodebuild"), false);
+    assert.equal(listing.stdout.includes("embedded.provisionprofile"), signing === undefined);
+    assert.equal(input.calls.filter((call) => call.command === input.signer).length, signing === "skip" ? 0 : 1);
+    assert.equal(input.calls.some((call) => call.command === "/bin/sh"), signing !== undefined);
   }
-});
-
-test("macOS renews configured provisioning before signing an expired or missing helper profile", async (t) => {
-  for (const initial_profile of ["expired", "missing"] as const) {
-    const input = await fixture(t, {
-      target: "aarch64-apple-darwin", configured_project: true, profile_from_home: true,
-      profile: initial_profile === "expired", profile_expired: initial_profile === "expired",
-    });
-    const result = await buildDesktopApp(input.options, input.run, input.build);
-    const archive = join(input.options.output, result.archive);
-    const embedded = await execute("tar", ["-xOf", archive,
-      "ctmux.app/Contents/Helpers/ctld.app/Contents/embedded.provisionprofile"]);
-    assert.equal(embedded.stdout, "renewed fixture provisioning profile");
-    const listing = await execute("tar", ["-tzf", archive]);
-    assert.ok(listing.stdout.includes("_CodeSignature/CodeResources"));
-    assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
-    assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 1);
-    assert.ok(input.calls.findIndex((call) => call.command === "xcodebuild") <
-      input.calls.findIndex((call) => call.command === "codesign"));
-    const receipt = JSON.parse(await readFile(join(input.options.output, "helper/installation.json"), "utf8"));
-    assert.equal(receipt.signing_mode, "development");
-  }
-});
-
-test("failed macOS provisioning renewal falls back to a clean unsigned helper", async (t) => {
-  const input = await fixture(t, {
-    target: "aarch64-apple-darwin", profile: true, profile_expired: true,
-    configured_project: true, renewal_failure: true, profile_from_home: true,
-  });
-  const result = await buildDesktopApp(input.options, input.run, input.build);
-  const listing = await execute("tar", ["-tzf", join(input.options.output, result.archive)]);
-  assert.ok(!listing.stdout.includes("embedded.provisionprofile"));
-  assert.ok(!listing.stdout.includes("_CodeSignature"));
-  assert.equal(input.calls.filter((call) => call.command === "xcodebuild").length, 1);
-  assert.equal(input.calls.some((call) => call.command === "codesign"), false);
-  assert.deepEqual(await readdir(join(input.options.output, "helper")), ["ctld.app"]);
 });
 
 test("failed or incomplete frontend builds cannot reuse earlier app outputs", async (t) => {
@@ -258,19 +191,20 @@ test("Windows local builds produce complete native portable apps without launchi
 });
 
 test("a helper signing failure falls back to a clean unsigned package", async (t) => {
-  const input = await fixture(t, { target: "aarch64-apple-darwin", profile: true, signing_failure: true });
+  const input = await fixture(t, { target: "aarch64-apple-darwin", signing: "partial" });
   const result = await buildDesktopApp(input.options, input.run, input.build);
   const listing = await execute("tar", ["-tzf", join(input.options.output, result.archive)]);
   assert.ok(!listing.stdout.includes("embedded.provisionprofile"));
   assert.ok(!listing.stdout.includes("_CodeSignature"));
-  assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 2);
+  assert.equal(input.calls.filter((call) => call.command === input.signer).length, 1);
+  assert.equal(input.calls.filter((call) => call.command === "/bin/sh").length, 1);
   assert.deepEqual(await readdir(join(input.options.output, "helper")), ["ctld.app"]);
 });
 
 test("invalid compiled helper metadata still fails before signing or bundling", async (t) => {
-  const input = await fixture(t, { target: "aarch64-apple-darwin", profile: true, invalid_helper: true });
+  const input = await fixture(t, { target: "aarch64-apple-darwin", invalid_helper: true });
   await assert.rejects(buildDesktopApp(input.options, input.run, input.build), /invalid source identity or version/);
-  assert.ok(!input.calls.some((call) => call.command === "/bin/sh" || call.command === "pnpm"));
+  assert.ok(!input.calls.some((call) => call.command === input.signer || call.command === "/bin/sh" || call.command === "pnpm"));
 });
 
 test("version mismatches fail before compiling or staging native services", async (t) => {

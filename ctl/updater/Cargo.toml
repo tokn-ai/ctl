@@ -50,8 +50,10 @@ lnks = { version = "0.2", default-features = false }
 zip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+base64.workspace = true
 flate2 = "1.1.11"
 libproc = "0.15.0"
+plist = "1.10.4"
 tar = { version = "0.4.46", default-features = false }
 
 [lints]

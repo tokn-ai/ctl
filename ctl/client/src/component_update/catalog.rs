@@ -165,7 +165,14 @@ async fn provision_native(
     return Ok(());
   };
   let component = &prepared[index];
-  if let Err(error) = crate::components::verify_local(home, &component.bundle).await {
+  #[cfg(target_os = "macos")]
+  let allow_ad_hoc =
+    component.authorized_ad_hoc_bundle.as_ref() == Some(&component.bundle.manifest.bundle_id);
+  #[cfg(not(target_os = "macos"))]
+  let allow_ad_hoc = false;
+  if let Err(error) =
+    crate::components::verify_local_for_activation(home, &component.bundle, allow_ad_hoc).await
+  {
     return if cfg!(target_os = "macos") && matches!(component.source, BuildSource::Automatic) {
       Err(io::Error::new(
         error.kind(),
@@ -174,6 +181,16 @@ async fn provision_native(
     } else {
       Err(error)
     };
+  }
+  #[cfg(target_os = "macos")]
+  if component.require_runtime_signing {
+    return crate::installation::provision_runtime_signing_manager(
+      home,
+      component.updater.as_deref(),
+      origin,
+      &component.bundle.manifest.components["ctl-agent"].build,
+    )
+    .await;
   }
   if let Some(bytes) = &component.updater {
     crate::installation::provision_manager_bytes(
@@ -316,6 +333,10 @@ async fn retained_component(
     updater_info,
     remote_archive: None,
     snapshot,
+    #[cfg(target_os = "macos")]
+    authorized_ad_hoc_bundle: None,
+    #[cfg(target_os = "macos")]
+    require_runtime_signing: false,
   })
 }
 

@@ -17,6 +17,12 @@ pub fn activate_uploaded(
   bundle: &ctl_core::bundles::Bundle,
   origin: Option<&CatalogOrigin>,
 ) -> io::Result<(ctl_core::bundles::Bundle, ctl_core::installations::Lease)> {
+  if bundle.manifest.target_triple.ends_with("-apple-darwin") && bundle.macos_ad_hoc_helper()? {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "an uploaded runtime cannot opt in to local ad hoc signing",
+    ));
+  }
   let installations = ctl_core::installations::Installations::new(home);
   let resolved_origin = if let Some(origin) = origin {
     origin.clone()

@@ -16,7 +16,6 @@
     "desktop:preview": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/desktop-preview.mts",
     "desktop:check": "pnpm --filter ctmux-app check",
     "desktop:test": "pnpm --filter ctmux-app exec vitest run",
-    "ctld:provision": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts --provision",
     "ctld:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/ctld-signed.mts",
     "daemons:build": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/prepare-daemons.mts",
     "bundles:check": "node --experimental-strip-types --disable-warning=ExperimentalWarning scripts/dev/sync-agent-bundles.mts --check",

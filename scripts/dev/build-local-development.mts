@@ -7,7 +7,7 @@ import { maxComponentMetadata, parseComponent, type ComponentInfo } from "../sha
 import { selectDaemonBuildArguments } from "./daemon-build.mts";
 import { metadataArguments, targetFromArtifacts } from "./signed-cargo-target.mts";
 import { developmentEnvironment, signDevelopmentHelper } from "./ctld-signed.mts";
-import { runMacosCommand, type MacosCommandRunner } from "./macos-provisioning.mts";
+import { runBuildCommand, type BuildCommandRunner } from "./build-command.mts";
 import { ensurePrivateDirectory } from "./signed-runtime.mts";
 
 const executables = [...agentComponents, "ctlup"] as const;
@@ -81,7 +81,7 @@ function verifyCohort(components: Record<Executable, ComponentInfo>, expected_ve
 
 /** Build and sign an immutable input snapshot. Activation belongs only to ctlup. */
 export async function buildLocalDevelopment(
-  options: LocalDevelopmentOptions, run: MacosCommandRunner = runMacosCommand,
+  options: LocalDevelopmentOptions, run: BuildCommandRunner = runBuildCommand,
 ): Promise<LocalDevelopmentResult> {
   const workspace = await realpath(options.workspace);
   const cargo_cwd = await realpath(options.cargo_cwd ?? process.cwd());
@@ -155,8 +155,8 @@ export async function buildLocalDevelopment(
   let ctld_package: string | null = null;
   if (target.endsWith("-apple-darwin")) {
     ctld_package = join(output, "helper");
-    await signDevelopmentHelper({ repository_root: workspace, target_directory, artifact: join(binary_directory, "ctld"),
-      target, app_version: expected_version, output_directory: ctld_package, env }, run);
+    await signDevelopmentHelper({ repository_root: workspace, artifact: binaryPath("ctld"),
+      app_version: expected_version, output_directory: ctld_package, env }, run);
   }
   const result: LocalDevelopmentResult = { schema_version: 1, target_triple: target, binary_directory,
     ctld_package, manager_executable: binaryPath("ctlup") };

@@ -377,9 +377,9 @@ fn prepare_aliases(store: &Installations, updater: Option<&[u8]>, refresh: bool)
   ensure_directory(&bin)?;
   let launcher = bin.join(LAUNCHER);
   let has_launcher = path_exists(&launcher)?;
-  if has_launcher {
-    executable_bytes(&launcher)?;
-  }
+  let current_launcher = has_launcher
+    .then(|| executable_bytes(&launcher))
+    .transpose()?;
   let mut aliases = Vec::new();
   for name in crate::bundle_layout::ALL.into_iter().chain(["ctlup"]) {
     let path = bin.join(name);
@@ -394,7 +394,9 @@ fn prepare_aliases(store: &Installations, updater: Option<&[u8]>, refresh: bool)
       aliases.push(path);
     }
   }
-  if let Some(bytes) = updater.filter(|_| !has_launcher || refresh) {
+  if let Some(bytes) = updater
+    .filter(|bytes| !has_launcher || (refresh && current_launcher.as_deref() != Some(*bytes)))
+  {
     replace_launcher(&launcher, bytes)?;
   }
   for alias in aliases {
@@ -412,6 +414,7 @@ pub(super) fn install_manager(
   updater: &[u8],
   build: &ComponentBuildInfo,
   origin: Option<&catalog::CatalogOrigin>,
+  refresh_launcher: bool,
 ) -> io::Result<()> {
   if updater.is_empty() || updater.len() > crate::bundles::MAX_FILE_BYTES {
     return Err(invalid("invalid updater executable size"));
@@ -465,7 +468,7 @@ pub(super) fn install_manager(
   }
   let refresh =
     state.updater_paths.object.launcher_layout != Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
-  prepare_aliases(store, Some(updater), refresh)?;
+  prepare_aliases(store, Some(updater), refresh || refresh_launcher)?;
   if refresh {
     state.updater_paths.object.launcher_layout = Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
     catalog::commit_updater_object_paths(store, &state.updater_paths.object)?;

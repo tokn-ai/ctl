@@ -270,5 +270,4 @@ jobs:
           pnpm desktop:preview --help
           pnpm desktop:build --help
           pnpm ctld:build --help
-          pnpm ctld:provision --help
           pnpm bundles:sync --help

@@ -7,6 +7,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod catalog;
+#[cfg(target_os = "macos")]
+pub use crate::components::macos_runtime::{
+  MacosRuntimeHelper, MacosRuntimeHelperMode, authorize_macos_ad_hoc, macos_runtime_helper_mode,
+  replace_macos_helper,
+};
 pub use catalog::install_prepared_components;
 mod remote_publication;
 pub use remote_publication::{
@@ -57,6 +62,10 @@ pub struct PreparedUpdate {
   updater_info: Option<crate::remote_bundle::published::UpdaterInfo>,
   remote_archive: Option<Vec<u8>>,
   snapshot: PreparationSnapshot,
+  #[cfg(target_os = "macos")]
+  pub(crate) authorized_ad_hoc_bundle: Option<String>,
+  #[cfg(target_os = "macos")]
+  require_runtime_signing: bool,
 }
 
 /// Installed channel state captured before resolving or building an update.
@@ -87,6 +96,12 @@ impl PreparedUpdate {
     if snapshot.started < self.snapshot.started {
       self.snapshot = snapshot.clone();
     }
+  }
+
+  /// Retains a manager that supports the local macOS signing workflow on future updates.
+  #[cfg(target_os = "macos")]
+  pub fn require_macos_runtime_signing(&mut self) {
+    self.require_runtime_signing = true;
   }
 }
 
@@ -139,6 +154,10 @@ pub async fn prepare_component(
     updater_info,
     remote_archive: None,
     snapshot,
+    #[cfg(target_os = "macos")]
+    authorized_ad_hoc_bundle: None,
+    #[cfg(target_os = "macos")]
+    require_runtime_signing: false,
   })
 }
 
@@ -304,6 +323,10 @@ async fn prepare_resolved_update(
     updater_info,
     remote_archive,
     snapshot,
+    #[cfg(target_os = "macos")]
+    authorized_ad_hoc_bundle: None,
+    #[cfg(target_os = "macos")]
+    require_runtime_signing: false,
   })
 }
 
@@ -484,7 +507,7 @@ async fn automatic_native(
     };
     if bundle.manifest.schema_version != 2
       || verify_source(&bundle.manifest, &target, Purpose::Local).is_err()
-      || (target.ends_with("-apple-darwin") && !has_signed_helper(&bundle))
+      || (target.ends_with("-apple-darwin") && !has_native_helper(&bundle)?)
     {
       return Ok(None);
     }
@@ -516,12 +539,15 @@ fn cached_exact(home: &Path, entry: &CatalogEntry) -> io::Result<Option<Bundle>>
   }
 }
 
-fn has_signed_helper(bundle: &Bundle) -> bool {
-  bundle.manifest.files.contains_key("ctld-package.json")
-    && bundle
-      .manifest
-      .files
-      .contains_key("ctld.app/Contents/MacOS/ctld")
+fn has_native_helper(bundle: &Bundle) -> io::Result<bool> {
+  Ok(
+    (bundle.manifest.files.contains_key("ctld-package.json")
+      && bundle
+        .manifest
+        .files
+        .contains_key("ctld.app/Contents/MacOS/ctld"))
+      || bundle.macos_ad_hoc_helper()?,
+  )
 }
 
 const SIGNED_MAC_RUNTIME_REBUILD: &str = "Run ctlup dev from a source checkout or supply native binaries with --from, --local-build and --ctld-package.";

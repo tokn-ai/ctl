@@ -22,9 +22,14 @@ impl Drop for Home {
 async fn local_source_install_pins_a_checkout_and_repairs_from_its_archive() {
   let home = Home::new();
   let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-  install_development(&home.0, &checkout, false)
-    .await
-    .unwrap();
+  install_development(
+    &home.0,
+    &checkout,
+    ctl_client::development::DesktopHelperSigning::Automatic,
+    false,
+  )
+  .await
+  .unwrap();
   let store = Installations::new(&home.0);
   let selection = store.desktop_selection().unwrap().unwrap();
   assert_eq!(selection.source, DesktopSource::Checkout);
@@ -33,7 +38,7 @@ async fn local_source_install_pins_a_checkout_and_repairs_from_its_archive() {
   assert!(name.starts_with("dev-") && name.ends_with("-local"));
   assert!(object.join(payload_name()).exists());
   fs::remove_dir_all(&object).unwrap();
-  update(&home.0, false, false).await.unwrap();
+  update(&home.0, false, None, false).await.unwrap();
   assert_eq!(store.desktop_selection().unwrap(), Some(selection));
   assert!(object.join(payload_name()).exists());
   assert!(
@@ -91,16 +96,13 @@ async fn verify_install_update_and_repair(archive: &Path, supports_named_leases:
     Home(path)
   };
   let store = Installations::new(&home.0);
-  if supports_named_leases {
+  {
     let work = activation::Workspace::begin(&home.0).unwrap();
     let metadata = DesktopMetadata::provided(DesktopTarget::native().unwrap());
     let mut package = prepare_supplied(&work, archive, metadata).unwrap();
-    package.naming.installation_layout_version = Some(DESKTOP_OBJECT_PATH_LAYOUT_VERSION);
+    package.naming.installation_layout_version =
+      supports_named_leases.then_some(DESKTOP_OBJECT_PATH_LAYOUT_VERSION);
     activate(&work, None, &package, DesktopSource::Provided, false).unwrap();
-  } else {
-    install(&home.0, None, None, None, Some(archive), false)
-      .await
-      .unwrap();
   }
   let selected = store.desktop_selection().unwrap().unwrap();
   assert_eq!(selected.source, DesktopSource::Provided);
@@ -142,7 +144,7 @@ async fn verify_install_update_and_repair(archive: &Path, supports_named_leases:
   }
   fs::remove_dir_all(&object).unwrap();
   assert!(app_status(&home.0, Some(selected.clone())).unwrap().missing);
-  update(&home.0, false, false).await.unwrap();
+  update(&home.0, false, None, false).await.unwrap();
   assert_eq!(store.desktop_selection().unwrap(), Some(selected));
   assert!(object.join(payload_name()).exists());
   assert!(

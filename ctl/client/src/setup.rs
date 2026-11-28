@@ -138,6 +138,58 @@ pub async fn inspect_ctld_package(
   Ok(macos::verify_helper(&session).await?.info)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn is_development_helper_receipt(receipt: &[u8], target: &str) -> Result<bool, Error> {
+  Ok(
+    manifest::Manifest::parse_installed(receipt, target)?
+      .development
+      .is_some(),
+  )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn create_runtime_helper_receipt(
+  component: &ctl_core::component::ComponentInfo,
+  target: &str,
+  team_identifier: &str,
+  development: bool,
+  sha256: String,
+  archive_size: u64,
+) -> Result<Vec<u8>, Error> {
+  let build = &component.build;
+  let version = &build.version;
+  let receipt = manifest::Manifest {
+    schema_version: 1,
+    component: "ctld".into(),
+    app_version: version.clone(),
+    bundle_id: if development {
+      format!("dev.{sha256}")
+    } else {
+      version.clone()
+    },
+    git_revision: build.source_revision.clone().ok_or_else(|| {
+      Error::InvalidRelease("the selected helper does not report a source revision".into())
+    })?,
+    target: target.into(),
+    bundle_identifier: manifest::BUNDLE_IDENTIFIER.into(),
+    team_identifier: team_identifier.into(),
+    signing_mode: if development { "development" } else { "signed" }.into(),
+    notarized: !development,
+    archive: format!("ctld-{version}-{target}.app.tar.gz"),
+    sha256,
+    archive_size,
+    protocols: component.protocols.clone(),
+    development: development.then(|| manifest::Development {
+      source_fingerprint: build.source_fingerprint.clone(),
+      dirty: build.dirty,
+    }),
+  };
+  let encoded =
+    serde_json::to_vec(&receipt).map_err(|error| Error::InvalidRelease(error.to_string()))?;
+  manifest::Manifest::parse_installed(&encoded, target)?;
+  Ok(encoded)
+}
+
 /// Reads the signing team from a receipt in a hash-verified development bundle.
 /// Its component identity must agree with the installed runtime manifest.
 #[cfg(target_os = "macos")]

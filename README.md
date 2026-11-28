@@ -139,7 +139,6 @@ to `ctlup`; macOS signing is included.
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm ctld:provision` | Open the shared macOS Xcode provisioning project |
 | `pnpm ctld:build` | Prepare a complete native development installation on macOS |
 | `pnpm desktop:dev` | Start the desktop; macOS and Linux delegate native preparation to ctlup |
 | `pnpm desktop:build` | Build native desktop packages |
@@ -233,22 +232,18 @@ authoritative for every build; shared discovery also retains explicit
 complete component selections and reports missing capabilities. Unsafe or invalid selected
 installations produce a verification error.
 
-For macOS CLI and GUI development, provision once with the same
-Xcode project used by Tauri:
+Use `ctlup dev` from the checkout root to prepare the complete native
+installation for macOS CLI and GUI development.
 
 ```sh
-pnpm ctld:provision
-```
-
-In Xcode, select the `ctld-provisioning` target, choose your team under
-**Signing & Capabilities**, and build once. For CLI development, prepare the
-complete native installation and start its CLI:
-
-```sh
-pnpm ctld:build
+ctlup dev
 ~/.tokn/ctl/bin/ctl passwords
 ~/.tokn/ctl/bin/ctlup status --json
 ```
+
+If `ctlup` opens the shared Xcode project on first use, choose your Apple Team
+under **Signing & Capabilities** for the `ctld-provisioning` target, build once,
+and rerun `ctlup dev`. See [local development builds](docs/local-bundles.md).
 
 For native GUI development, run `pnpm desktop:dev`. On macOS and Linux its
 launcher delegates each native preparation to `ctlup dev`, including macOS

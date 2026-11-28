@@ -3,11 +3,18 @@ use tokio::{fs, process::Command};
 
 use super::Runner;
 
+pub(super) enum Identity<'a> {
+  DeveloperId(&'a Path),
+  Development(&'a Path),
+  AdHoc,
+}
+
 pub(super) async fn sign(
+  binary: &Path,
   app: &Path,
   stage: &Path,
   version: &str,
-  profile: &Path,
+  identity: Identity<'_>,
   runner: &Runner,
 ) -> io::Result<String> {
   let packaging = stage.join("ctld-packaging");
@@ -26,28 +33,43 @@ pub(super) async fn sign(
     fs::write(packaging.join(name), contents).await?;
   }
 
-  let identity = packaging.join("signing-identity");
-  let helper = app.join("Contents/Helpers/ctld.app");
-  runner
-    .output(
-      Command::new("/bin/sh")
-        .arg(packaging.join("package-ctld-app.sh"))
-        .arg(helper.join("Contents/MacOS/ctld"))
-        .arg(helper)
-        .arg(version)
-        .env("CTLD_PROVISIONING_PROFILE", profile)
-        .env("CTLD_REQUIRE_DISTRIBUTION_SIGNING", "true")
-        .env("CTLD_SIGNING_TIMESTAMP", "secure")
-        .env("CTLD_SIGNING_IDENTITY_OUTPUT", &identity)
-        .env("TMPDIR", &packaging),
-    )
-    .await?;
-  let fingerprint = fs::read_to_string(identity).await?;
+  let (profile, distribution, timestamp) = match identity {
+    Identity::DeveloperId(profile) => (Some(profile), "true", "secure"),
+    Identity::Development(profile) => (Some(profile), "false", "none"),
+    Identity::AdHoc => (None, "false", "none"),
+  };
+  let identity_file = packaging.join("signing-identity");
+  let mut package = Command::new("/bin/sh");
+  package
+    .arg(packaging.join("package-ctld-app.sh"))
+    .arg(binary)
+    .arg(app)
+    .arg(version)
+    .env_remove("CTLD_PROVISIONING_PROFILE")
+    .env("CTLD_REQUIRE_DISTRIBUTION_SIGNING", distribution)
+    .env("CTLD_SIGNING_TIMESTAMP", timestamp)
+    .env("CTLD_SIGNING_IDENTITY_OUTPUT", &identity_file)
+    .env("TMPDIR", &packaging);
+  if let Some(profile) = profile {
+    package.env("CTLD_PROVISIONING_PROFILE", profile);
+  }
+  runner.output(&mut package).await?;
+  if matches!(identity, Identity::AdHoc) {
+    runner
+      .output(
+        Command::new("/usr/bin/codesign")
+          .args(["--force", "--timestamp=none", "--sign", "-"])
+          .arg(app),
+      )
+      .await?;
+    return Ok("-".into());
+  }
+  let fingerprint = fs::read_to_string(identity_file).await?;
   let fingerprint = fingerprint.trim();
   if fingerprint.len() != 40 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
     return Err(io::Error::new(
       io::ErrorKind::InvalidData,
-      "ctld signing did not return a Developer ID certificate fingerprint",
+      "ctld signing did not return a certificate fingerprint",
     ));
   }
   Ok(fingerprint.to_owned())

@@ -78,7 +78,31 @@ pub(crate) async fn provision_manager_from_for_build(
 pub(crate) async fn provision_manager_bytes(
   home: &Path,
   bytes: Vec<u8>,
+  provenance: Option<(&CatalogOrigin, &ComponentBuildInfo)>,
+) -> io::Result<()> {
+  provision_manager_candidate(home, bytes, provenance, false).await
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn provision_runtime_signing_manager(
+  home: &Path,
+  bytes: Option<&[u8]>,
+  origin: &CatalogOrigin,
+  build: &ComponentBuildInfo,
+) -> io::Result<()> {
+  let bytes = if let Some(bytes) = bytes {
+    bytes.to_vec()
+  } else {
+    native_updater(&std::env::current_exe()?).await?
+  };
+  provision_manager_candidate(home, bytes, Some((origin, build)), true).await
+}
+
+async fn provision_manager_candidate(
+  home: &Path,
+  bytes: Vec<u8>,
   mut provenance: Option<(&CatalogOrigin, &ComponentBuildInfo)>,
+  require_runtime_signing: bool,
 ) -> io::Result<()> {
   if let Some((origin, _)) = provenance {
     origin.validate()?;
@@ -86,21 +110,16 @@ pub(crate) async fn provision_manager_bytes(
   let mut stage = stage_manager(home, bytes).await?;
   // Probe the exact staged bytes, including architecture and command identity.
   let (mut verified, mut build) = verified_native_updater(&stage.0).await?;
-  let capable = supports_development_layout(&stage.0).await;
+  let capable = supports_manager_requirements(&stage.0, require_runtime_signing).await;
   let lock = lock_manager_provisioning(home).await?;
   if !capable {
-    if installed_supports_development_layout(home).await? {
+    if !require_runtime_signing && installed_supports_development_layout(home).await? {
       return Ok(());
     }
-    let executable = std::env::current_exe()?;
-    if !updater_path(&executable) || !supports_development_layout(&executable).await {
-      return Err(io::Error::other(format!(
-        "this publication requires a compatible ctlup; install an updater that supports storage layout {DEVELOPMENT_LAYOUT_VERSION}"
-      )));
-    }
-    stage = stage_manager(home, native_updater(&executable).await?).await?;
+    let bytes = compatible_manager_bytes(home, require_runtime_signing).await?;
+    stage = stage_manager(home, bytes).await?;
     (verified, build) = verified_native_updater(&stage.0).await?;
-    if !supports_development_layout(&stage.0).await {
+    if !supports_manager_requirements(&stage.0, require_runtime_signing).await {
       return Err(io::Error::other(
         "the running updater changed during provisioning",
       ));
@@ -123,10 +142,53 @@ pub(crate) async fn provision_manager_bytes(
   let home = home.to_owned();
   tokio::task::spawn_blocking(move || {
     let _lock = lock;
-    Installations::new(&home).install_manager(&verified, &build, Some(&origin))
+    let installations = Installations::new(&home);
+    #[cfg(target_os = "macos")]
+    if require_runtime_signing {
+      return installations.install_manager_and_refresh_launcher(&verified, &build, Some(&origin));
+    }
+    installations.install_manager(&verified, &build, Some(&origin))
   })
   .await
   .map_err(io::Error::other)?
+}
+
+async fn compatible_manager_bytes(
+  home: &Path,
+  require_runtime_signing: bool,
+) -> io::Result<Vec<u8>> {
+  if require_runtime_signing
+    && let Some((path, _lease)) = Installations::new(home).manager_and_lease()?
+    && supports_manager_requirements(&path, true).await
+  {
+    return native_updater(&path).await;
+  }
+  let executable = std::env::current_exe()?;
+  if !updater_path(&executable)
+    || !supports_manager_requirements(&executable, require_runtime_signing).await
+  {
+    let detail = if require_runtime_signing {
+      "macOS runtime signing".to_owned()
+    } else {
+      format!("storage layout {DEVELOPMENT_LAYOUT_VERSION}")
+    };
+    return Err(io::Error::other(format!(
+      "this installation requires a compatible ctlup; install an updater that supports {detail}"
+    )));
+  }
+  native_updater(&executable).await
+}
+
+async fn supports_manager_requirements(path: &Path, require_runtime_signing: bool) -> bool {
+  supports_development_layout(path).await
+    && (!require_runtime_signing
+      || updater_output(path, "macos-runtime-signing-version")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|output| String::from_utf8(output).ok())
+        .and_then(|output| output.trim().parse::<u16>().ok())
+        .is_some_and(|version| version >= 1))
 }
 
 async fn lock_manager_provisioning(home: &Path) -> io::Result<std::fs::File> {
@@ -565,6 +627,40 @@ mod tests {
         .unwrap();
       let (installed, _lease) = store.manager_and_lease().unwrap().unwrap();
       assert_eq!(&std::fs::read(&installed).unwrap(), expected);
+    }
+  }
+
+  #[cfg(target_os = "macos")]
+  #[tokio::test]
+  async fn local_runtime_signing_keeps_a_capable_manager_and_refreshes_an_older_launcher() {
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+    let home = super::super::TemporaryDirectory::new("updater-signing").unwrap();
+    let fixture =
+      crate::remote_bundle::compatibility::tests::Fixture::new("0.1.0", &"a".repeat(40))
+        .with_clients();
+    let metadata = &fixture.outer["targets"]["aarch64-apple-darwin"]["components"]["ctl"];
+    let manager = |capability: &str| {
+      format!(
+        "#!/bin/sh\ncase \"$1\" in --component-info) cat <<'METADATA'\n{metadata}\nMETADATA\n;; --version) printf 'ctlup 0.1.0\\n';; installation-layout-version) printf '{DEVELOPMENT_LAYOUT_VERSION}\\n';; {capability} *) exit 1;; esac\n"
+      )
+      .into_bytes()
+    };
+    let old = manager("");
+    let capable = manager("macos-runtime-signing-version) printf '1\\n';;");
+    let store = Installations::new(&home.0);
+    let launcher = store.root().join("bin/.ctl-launcher");
+
+    provision_manager_bytes(&home.0, old.clone(), None)
+      .await
+      .unwrap();
+    assert_eq!(std::fs::read(&launcher).unwrap(), old);
+    for candidate in [capable.clone(), old] {
+      provision_manager_candidate(&home.0, candidate, None, true)
+        .await
+        .unwrap();
+      let (installed, _lease) = store.manager_and_lease().unwrap().unwrap();
+      assert_eq!(std::fs::read(installed).unwrap(), capable);
+      assert_eq!(std::fs::read(&launcher).unwrap(), capable);
     }
   }
 

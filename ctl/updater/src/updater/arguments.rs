@@ -49,8 +49,20 @@ pub(super) enum Command {
   },
   /// Build and install from the current checkout.
   Dev(DevelopmentArguments),
-  /// Renew local macOS development signing or sign a CI release.
+  /// Renew local macOS development signing or sign a cached desktop build.
   Sign(SignArguments),
+  #[cfg(target_os = "macos")]
+  #[command(hide = true)]
+  SignDevelopmentHelper {
+    #[arg(long)]
+    artifact: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    version: String,
+    #[arg(long)]
+    non_interactive: bool,
+  },
   /// Show installed builds, their sources and missing payloads.
   Status(StatusArguments),
   /// Browse available releases and pull request builds.
@@ -96,6 +108,9 @@ pub(super) enum Command {
   PrepareInstall,
   #[command(hide = true)]
   InstallationLayoutVersion,
+  #[cfg(target_os = "macos")]
+  #[command(hide = true)]
+  MacosRuntimeSigningVersion,
   #[command(hide = true)]
   UpdaterDigest,
 }
@@ -238,11 +253,36 @@ pub(super) enum PackageSelection {
   App,
 }
 
+#[derive(Debug, Default, Args)]
+pub(super) struct SigningArguments {
+  /// Sign for this Mac with an Apple Development identity and provisioning profile.
+  #[arg(long, conflicts_with = "ad_hoc")]
+  provision: bool,
+  /// Sign for this Mac without Apple credentials. Saved credentials are unavailable.
+  #[arg(long)]
+  ad_hoc: bool,
+}
+
+impl SigningArguments {
+  pub(super) fn mode(&self) -> Option<super::sign::SigningMode> {
+    use super::sign::SigningMode;
+    if self.provision {
+      Some(SigningMode::Provision)
+    } else if self.ad_hoc {
+      Some(SigningMode::AdHoc)
+    } else {
+      None
+    }
+  }
+}
+
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("source").args(["channel", "release", "pr", "from"])))]
 pub(super) struct InstallArguments {
   #[command(flatten)]
   pub destination: DestinationArguments,
+  #[command(flatten)]
+  pub signing: SigningArguments,
   #[arg(value_enum, default_value = "runtime")]
   pub package: PackageSelection,
   /// Track the selected publication channel.
@@ -271,10 +311,12 @@ pub(super) struct InstallArguments {
 pub(super) struct UpdateArguments {
   #[command(flatten)]
   pub destination: DestinationArguments,
+  #[command(flatten)]
+  pub signing: SigningArguments,
   #[arg(value_enum, default_value = "runtime")]
   pub package: PackageSelection,
   /// Check the recorded source without installing anything.
-  #[arg(long)]
+  #[arg(long, conflicts_with_all = ["provision", "ad_hoc"])]
   pub check: bool,
   #[arg(long)]
   pub json: bool,
@@ -292,14 +334,22 @@ pub(super) struct StatusArguments {
 
 #[derive(Debug, Args)]
 pub(super) struct SignArguments {
-  /// Sign and notarize the CI build for a tagged release.
-  #[arg(long)]
+  #[command(flatten)]
+  pub signing: SigningArguments,
+  /// Choose and provision an Apple Team for future signing.
+  #[arg(long, requires = "provision", conflicts_with_all = ["cached_desktop", "target", "workspace", "ad_hoc"])]
+  pub team: bool,
+  /// Select a cached desktop build by its exact build ID.
+  #[arg(long, group = "cached_desktop")]
   pub version: Option<String>,
-  /// macOS Rust target for the CI build. Defaults to the current architecture.
-  #[arg(long, requires = "version", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
+  /// Select the last locally cached desktop build for a channel.
+  #[arg(long, value_enum, group = "cached_desktop")]
+  pub channel: Option<Channel>,
+  /// macOS Rust target of the cached build. Defaults to the current architecture.
+  #[arg(long, requires = "cached_desktop", value_parser = ["aarch64-apple-darwin", "x86_64-apple-darwin"], value_name = "TRIPLE")]
   pub target: Option<String>,
-  /// Checkout containing the development signer. Defaults to the current directory.
-  #[arg(long, conflicts_with = "version")]
+  /// Retained for compatibility when renewing a checkout build.
+  #[arg(long, conflicts_with_all = ["cached_desktop", "provision", "ad_hoc"])]
   pub workspace: Option<PathBuf>,
   /// Output the result as JSON.
   #[arg(long)]
@@ -348,6 +398,23 @@ pub(super) struct DevelopmentArguments {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn macos_signing_modes_are_explicit_and_mutually_exclusive() {
+    use super::super::sign::SigningMode;
+    for command in ["install", "update", "sign"] {
+      assert!(Arguments::try_parse_from(["ctlup", command, "--provision", "--ad-hoc"]).is_err());
+      let arguments = Arguments::try_parse_from(["ctlup", command, "--ad-hoc"]).unwrap();
+      let signing = match arguments.command {
+        Command::Install(options) => options.signing,
+        Command::Update(options) => options.signing,
+        Command::Sign(options) => options.signing,
+        _ => unreachable!(),
+      };
+      assert_eq!(signing.mode(), Some(SigningMode::AdHoc));
+    }
+    assert!(Arguments::try_parse_from(["ctlup", "update", "--check", "--provision"]).is_err());
+  }
 
   #[test]
   fn install_and_update_distinguish_source_selection_from_tracking() {
@@ -484,15 +551,17 @@ mod tests {
   }
 
   #[test]
-  fn signing_distinguishes_development_from_tagged_releases() {
+  fn signing_distinguishes_development_from_cached_desktop_builds() {
     let args = Arguments::try_parse_from(["ctlup", "sign"]).unwrap();
     assert!(matches!(
       args.command,
       Command::Sign(SignArguments {
         version: None,
+        channel: None,
         target: None,
         workspace: None,
         json: false,
+        ..
       })
     ));
     let args = Arguments::try_parse_from(["ctlup", "sign", "--version", "v0.1.5"]).unwrap();
@@ -515,12 +584,54 @@ mod tests {
       );
     }
     assert!(Arguments::try_parse_from(["ctlup", "sign", "--workspace", "checkout"]).is_ok());
+    assert!(
+      Arguments::try_parse_from([
+        "ctlup",
+        "sign",
+        "--channel",
+        "nightly",
+        "--target",
+        "aarch64-apple-darwin"
+      ])
+      .is_ok()
+    );
     for options in [
       &["--target", "aarch64-apple-darwin"][..],
       &["--version", "0.1.5", "--target", "x86_64-unknown-linux-gnu"],
       &["--version", "0.1.5", "--workspace", "checkout"],
+      &["--channel", "nightly", "--version", "0.1.5"],
+      &["--channel", "stable", "--workspace", "checkout"],
     ] {
       assert!(Arguments::try_parse_from([&["ctlup", "sign"], options].concat()).is_err());
+    }
+  }
+
+  #[test]
+  fn team_option_only_prepares_development_provisioning() {
+    let args = Arguments::try_parse_from(["ctlup", "sign", "--provision", "--team"]).unwrap();
+    assert!(matches!(
+      args.command,
+      Command::Sign(SignArguments { team: true, .. })
+    ));
+    for args in [
+      &["sign", "--team"][..],
+      &["sign", "--ad-hoc", "--team"],
+      &["sign", "--team", "--workspace", "checkout"],
+      &[
+        "sign",
+        "--provision",
+        "--team",
+        "--target",
+        "aarch64-apple-darwin",
+      ],
+      &["sign", "--provision", "--team", "--channel", "nightly"],
+      &["sign", "--provision", "--team", "--version", "0.1.5"],
+      &["provision-ctld"],
+    ] {
+      assert!(
+        Arguments::try_parse_from(std::iter::once("ctlup").chain(args.iter().copied())).is_err(),
+        "invalid team setup arguments were accepted: {args:?}"
+      );
     }
   }
 }

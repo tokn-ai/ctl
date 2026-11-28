@@ -23,10 +23,21 @@ struct BuildResult {
   archive: String,
 }
 
+#[derive(Clone, Copy)]
+pub enum DesktopHelperSigning<'a> {
+  Automatic,
+  Profile(&'a Path),
+  Unsigned,
+}
+
 /// Builds a native desktop package into a fresh private output directory.
 /// # Errors
 /// Reports a missing checkout, build failures, or invalid output metadata.
-pub async fn build_desktop(workspace: &Path, output: &Path) -> io::Result<DesktopBuild> {
+pub async fn build_desktop(
+  workspace: &Path,
+  output: &Path,
+  signing: DesktopHelperSigning<'_>,
+) -> io::Result<DesktopBuild> {
   let workspace = checkout(workspace)?;
   let source_revision = checkout_revision(&workspace).await;
   private_fs::create_directory(output)?;
@@ -49,6 +60,18 @@ pub async fn build_desktop(workspace: &Path, output: &Path) -> io::Result<Deskto
     .env_remove("CTMUX_DEV_APP_SUPERVISOR")
     .env_remove("CTMUX_DEV_CTLD_EXECUTABLE")
     .env_remove("CTMUX_DEV_APP_FAILURE_MARKER");
+  command.env_remove("CTLUP_SKIP_DEVELOPMENT_SIGNING");
+  match signing {
+    DesktopHelperSigning::Unsigned => {
+      command.env("CTLUP_SKIP_DEVELOPMENT_SIGNING", "1");
+    }
+    DesktopHelperSigning::Profile(profile) => {
+      super::configure_development_signer(&mut command, Some(profile))?;
+    }
+    DesktopHelperSigning::Automatic => {
+      super::configure_development_signer(&mut command, None)?;
+    }
+  }
   run_recipe(command, "desktop development build").await?;
   let mut built = read_output(&output, archive_name())?;
   built.source_revision = source_revision;

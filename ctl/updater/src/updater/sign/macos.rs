@@ -1,5 +1,6 @@
-use super::{SignArguments, helper, input};
-use ctl_client::remote_bundle::desktop::{self, DesktopRelease, DesktopSigning, DesktopTarget};
+use super::{DesktopInput, SignArguments, SigningMode, helper, input, provisioning};
+use ctl_client::remote_bundle::desktop::{DesktopSigning, DesktopTarget};
+use ctl_core::bundles::Source;
 use ctl_core::installations::Installations;
 use ctl_core::private_fs;
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::future::Future;
-use std::io;
+use std::io::{self, IsTerminal as _, Read as _};
 use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -16,13 +17,24 @@ use tokio::sync::watch;
 
 const APP_IDENTIFIER: &str = "dev.tokn-ai.ctl.ctmux";
 const APP_NAME: &str = "ctmux.app";
+const HELPER_APP: &str = "Contents/Helpers/ctld.app";
+const HELPER_EXECUTABLE: &str = "Contents/MacOS/ctld";
 const SIDECARS: &[&str] = &["ctmuxd", "ctl-taskd"];
+const SIGNING_CONFIGURATION: &[&str] = &[
+  "CTLD_PROVISIONING_PROFILE",
+  "APPLE_API_KEY_PATH",
+  "APPLE_API_KEY",
+  "APPLE_API_ISSUER",
+];
 
-pub(super) struct Runner(watch::Receiver<bool>);
+pub(super) struct Runner {
+  cancellation: watch::Receiver<bool>,
+  inherited_group: bool,
+}
 
 impl Runner {
-  fn check(&self) -> io::Result<()> {
-    if *self.0.borrow() {
+  pub(super) fn check(&self) -> io::Result<()> {
+    if *self.cancellation.borrow() {
       Err(interrupted())
     } else {
       Ok(())
@@ -30,10 +42,13 @@ impl Runner {
   }
 
   async fn cancelled(&self) {
-    let _ = self.0.clone().wait_for(|stop| *stop).await;
+    let _ = self.cancellation.clone().wait_for(|stop| *stop).await;
   }
 
-  async fn cancellable<T>(&self, operation: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+  pub(super) async fn cancellable<T>(
+    &self,
+    operation: impl Future<Output = io::Result<T>>,
+  ) -> io::Result<T> {
     self.check()?;
     tokio::select! {
       result = operation => result,
@@ -42,20 +57,37 @@ impl Runner {
   }
 
   pub(super) async fn output(&self, command: &mut Command) -> io::Result<Output> {
-    self.check()?;
     let program = command
       .as_std()
       .get_program()
       .to_string_lossy()
       .into_owned();
-    let child = command
+    let output = self.capture(command).await?;
+    if !output.status.success() {
+      let diagnostic = String::from_utf8_lossy(&output.stderr);
+      return Err(io::Error::other(format!(
+        "{program} exited with {}\n{}",
+        output.status,
+        diagnostic.trim()
+      )));
+    }
+    Ok(output)
+  }
+
+  async fn capture(&self, command: &mut Command) -> io::Result<Output> {
+    self.check()?;
+    command
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
-      .process_group(0)
-      .kill_on_drop(true)
-      .spawn()?;
-    let group = child
+      .kill_on_drop(true);
+    // Checkout recipes own the whole build group and kill it if their
+    // controlling process exits. Keep nested Xcode and signing jobs in it.
+    if !self.inherited_group {
+      command.process_group(0);
+    }
+    let child = command.spawn()?;
+    let pid = child
       .id()
       .and_then(|id| i32::try_from(id).ok())
       .and_then(Pid::from_raw)
@@ -65,20 +97,14 @@ impl Runner {
     let output = tokio::select! {
       result = &mut output => result?,
       () = self.cancelled() => {
-        let _ = kill_process_group(group, Signal::KILL);
-        let _ = output.await;
+        if !self.inherited_group {
+          let _ = kill_process_group(pid, Signal::KILL);
+          let _ = output.await;
+        }
         return Err(interrupted());
       }
     };
     self.check()?;
-    if !output.status.success() {
-      let diagnostic = String::from_utf8_lossy(&output.stderr);
-      return Err(io::Error::other(format!(
-        "{program} exited with {}\n{}",
-        output.status,
-        diagnostic.trim()
-      )));
-    }
     Ok(output)
   }
 }
@@ -105,6 +131,51 @@ impl SigningCredentials {
       issuer: required_env("APPLE_API_ISSUER")?,
     })
   }
+
+  fn is_configured() -> bool {
+    SIGNING_CONFIGURATION
+      .iter()
+      .all(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+  }
+}
+
+async fn developer_id_credentials(runner: &Runner) -> io::Result<SigningCredentials> {
+  if !SigningCredentials::is_configured() || !developer_id_available(runner).await? {
+    return Err(io::Error::other(
+      "An unsigned macOS build requires a Developer ID Application identity, its ctld provisioning profile, and notarization credentials. Use --provision for Xcode development signing or --ad-hoc to install without an Apple account.",
+    ));
+  }
+  SigningCredentials::load()
+}
+
+async fn developer_id_available(runner: &Runner) -> io::Result<bool> {
+  let output = runner
+    .capture(Command::new("/usr/bin/security").args(["find-identity", "-v", "-p", "codesigning"]))
+    .await?;
+  if !output.status.success() {
+    return Err(io::Error::other(format!(
+      "Could not query Keychain signing identities ({}).",
+      output.status
+    )));
+  }
+  Ok(developer_id_listed(&String::from_utf8_lossy(
+    &output.stdout,
+  )))
+}
+
+fn developer_id_listed(identities: &str) -> bool {
+  identities.lines().any(|line| {
+    let Some((index, identity)) = line.trim_start().split_once(')') else {
+      return false;
+    };
+    let Some((fingerprint, name)) = identity.trim_start().split_once(' ') else {
+      return false;
+    };
+    index.parse::<u32>().is_ok()
+      && fingerprint.len() == 40
+      && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+      && name.trim_start().starts_with("\"Developer ID Application:")
+  })
 }
 
 fn required_env(name: &str) -> io::Result<OsString> {
@@ -218,21 +289,22 @@ async fn sign_app(runner: &Runner, app: &Path, identity: &str) -> io::Result<()>
     .iter()
     .map(|name| app.join("Contents/MacOS").join(name));
   for item in sidecars.chain(std::iter::once(app.to_owned())) {
-    runner
-      .output(
-        Command::new("/usr/bin/codesign")
-          .args([
-            "--force",
-            "--options",
-            "runtime",
-            "--timestamp",
-            "--sign",
-            identity,
-          ])
-          .arg(item),
-      )
-      .await?;
+    sign_code(runner, &item, identity).await?;
   }
+  Ok(())
+}
+
+async fn sign_code(runner: &Runner, path: &Path, identity: &str) -> io::Result<()> {
+  let mut command = Command::new("/usr/bin/codesign");
+  command.arg("--force");
+  if identity == "-" {
+    command.arg("--timestamp=none");
+  } else {
+    command.args(["--options", "runtime", "--timestamp"]);
+  }
+  runner
+    .output(command.args(["--sign", identity]).arg(path))
+    .await?;
   Ok(())
 }
 
@@ -388,22 +460,13 @@ async fn pack_image(
 
 async fn stage_signed_app(
   runner: &Runner,
-  release: &DesktopRelease,
+  archive: &Path,
+  app_version: &str,
   credentials: &SigningCredentials,
   stage: &Path,
   arch: &str,
 ) -> io::Result<(PathBuf, String)> {
-  let unpacked = stage.join("bundle");
-  private_fs::create_directory(&unpacked)?;
-  let archive = stage.join(release.asset_name());
-  eprintln!("Downloading {}…", release.asset_name());
-  runner.cancellable(release.download(&archive)).await?;
-  let app = tokio::task::spawn_blocking({
-    let version = release.app_version.clone();
-    move || input::prepare(&archive, &unpacked, &version)
-  })
-  .await
-  .map_err(io::Error::other)??;
+  let app = stage_input(archive, app_version, stage).await?;
   for executable in [
     "Contents/MacOS/ctmux-app",
     "Contents/MacOS/ctmuxd",
@@ -418,28 +481,51 @@ async fn stage_signed_app(
       )
       .await?;
   }
+  let helper_app = app.join(HELPER_APP);
   let identity = helper::sign(
-    &app,
+    &helper_app.join(HELPER_EXECUTABLE),
+    &helper_app,
     stage,
-    &release.app_version,
-    &credentials.profile,
+    app_version,
+    helper::Identity::DeveloperId(&credentials.profile),
     runner,
   )
   .await?;
   sign_app(runner, &app, &identity).await?;
-  let submission = stage.join("ctmux.zip");
+  notarize_app(runner, &app, stage, credentials).await?;
+  verify_app(runner, &app, arch).await?;
+  Ok((app, identity))
+}
+
+async fn stage_input(archive: &Path, app_version: &str, stage: &Path) -> io::Result<PathBuf> {
+  let unpacked = stage.join("bundle");
+  private_fs::create_directory(&unpacked)?;
+  tokio::task::spawn_blocking({
+    let archive = archive.to_owned();
+    let version = app_version.to_owned();
+    move || input::prepare(&archive, &unpacked, &version)
+  })
+  .await
+  .map_err(io::Error::other)?
+}
+
+async fn notarize_app(
+  runner: &Runner,
+  app: &Path,
+  stage: &Path,
+  credentials: &SigningCredentials,
+) -> io::Result<()> {
+  let submission = stage.join("notarization.zip");
   runner
     .output(
       Command::new("/usr/bin/ditto")
         .args(["-c", "-k", "--keepParent"])
-        .arg(&app)
+        .arg(app)
         .arg(&submission),
     )
     .await?;
-  notarize(runner, &submission, &app, credentials).await?;
-  verify_app(runner, &app, arch).await?;
-  fs::remove_file(submission)?;
-  Ok((app, identity))
+  notarize(runner, &submission, app, credentials).await?;
+  fs::remove_file(submission)
 }
 
 async fn pack_archive(
@@ -448,7 +534,8 @@ async fn pack_archive(
   stage: &Path,
   archive: &Path,
   version: &str,
-  arch: &str,
+  arch: &'static str,
+  mode: SigningMode,
 ) -> io::Result<()> {
   runner
     .output(
@@ -469,43 +556,54 @@ async fn pack_archive(
     let version = version.to_owned();
     let archive = archive.to_owned();
     move || {
-      crate::updater::app::macos::stage(&archive, &transported, &version, DesktopSigning::Unsigned)
+      let app = crate::updater::app::macos::stage(
+        &archive,
+        &transported,
+        &version,
+        DesktopSigning::Unsigned,
+      )?;
+      if mode != SigningMode::DeveloperId {
+        crate::updater::app::macos::verify_local_signature(&app, mode, arch)?;
+      }
+      Ok::<_, io::Error>(app)
     }
   })
   .await
   .map_err(io::Error::other)??;
-  validate_ticket(runner, &transported_app).await?;
-  verify_app(runner, &transported_app, arch).await
+  if mode == SigningMode::DeveloperId {
+    validate_ticket(runner, &transported_app).await?;
+    verify_app(runner, &transported_app, arch).await?;
+  }
+  Ok(())
 }
 
 async fn finish_signing(
   runner: &Runner,
   home: &Path,
-  version: &str,
-  target: DesktopTarget,
+  package: DesktopInput<'_>,
+  arch: &'static str,
   credentials: &SigningCredentials,
   json: bool,
 ) -> io::Result<()> {
-  let release = runner
-    .cancellable(desktop::unsigned_macos_release(version, target))
-    .await?;
-  let arch = if target == DesktopTarget::MacArm64 {
-    "arm64"
-  } else {
-    "x86_64"
-  };
-  let target = target.triple();
+  let target = package.target.triple();
   let output = Installations::new(home)
     .updater_root()
     .join("signed")
-    .join(format!("v{version}"))
+    .join(format!("v{}", package.bundle_id))
     .join(target);
   let mut scratch = Scratch::allocate(&output)?;
-  let (app, identity) =
-    stage_signed_app(runner, &release, credentials, &scratch.stage, arch).await?;
+  let (app, identity) = stage_signed_app(
+    runner,
+    package.archive,
+    package.app_version,
+    credentials,
+    &scratch.stage,
+    arch,
+  )
+  .await?;
   let assets = scratch.stage.join("assets");
   private_fs::create_directory(&assets)?;
-  let prefix = format!("ctmux-{version}-{target}");
+  let prefix = format!("ctmux-{}-{target}", package.bundle_id);
   let dmg_name = format!("{prefix}.dmg");
   let dmg = assets.join(&dmg_name);
   pack_image(runner, &app, &scratch.stage, &dmg, &identity).await?;
@@ -524,17 +622,18 @@ async fn finish_signing(
     &app,
     &scratch.stage,
     &assets.join(&archive_name),
-    version,
+    package.app_version,
     arch,
+    SigningMode::DeveloperId,
   )
   .await?;
 
   let manifest = tokio::task::spawn_blocking({
     let assets = assets.clone();
     let target = target.to_owned();
-    let installation_layout_version = release.installation_layout_version();
-    let bundle_id = release.bundle_id;
-    let git_revision = release.source_revision;
+    let installation_layout_version = package.installation_layout_version;
+    let bundle_id = package.bundle_id.to_owned();
+    let git_revision = package.source_revision.to_owned();
     move || {
       let manifest = Manifest {
         schema_version: 1,
@@ -575,9 +674,402 @@ async fn finish_signing(
   Ok(())
 }
 
-async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) -> io::Result<()> {
-  let workspace = workspace.map_or_else(std::env::current_dir, Ok)?;
-  let prepared = ctl_client::development::renew_signing(home, &workspace).await?;
+fn signing_architecture(package: DesktopInput<'_>) -> io::Result<&'static str> {
+  validate_build_name(package.app_version)?;
+  validate_build_name(package.bundle_id)?;
+  if package.source_revision.len() != 40
+    || !package
+      .source_revision
+      .bytes()
+      .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "The local desktop package has an invalid source revision.",
+    ));
+  }
+  target_architecture(package.target)
+}
+
+fn validate_build_name(name: &str) -> io::Result<()> {
+  if name.len() > 128
+    || !name.as_bytes().first().is_some_and(u8::is_ascii_digit)
+    || !name
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "The local desktop package has an invalid build name or version.",
+    ));
+  }
+  Ok(())
+}
+
+fn target_architecture(target: DesktopTarget) -> io::Result<&'static str> {
+  match target {
+    DesktopTarget::MacArm64 => Ok("arm64"),
+    DesktopTarget::MacX64 => Ok("x86_64"),
+    _ => Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Choose an Apple Silicon or Intel macOS target.",
+    )),
+  }
+}
+
+pub(in crate::updater) async fn export_desktop(
+  home: &Path,
+  package: DesktopInput<'_>,
+  json: bool,
+) -> io::Result<()> {
+  let arch = signing_architecture(package)?;
+  with_signing_signals(async |runner| {
+    let credentials = developer_id_credentials(runner).await?;
+    finish_signing(runner, home, package, arch, &credentials, json).await
+  })
+  .await
+}
+
+pub(in crate::updater) struct DesktopSigningOptions<'a> {
+  pub mode: SigningMode,
+  pub interactive: bool,
+  pub profile: Option<&'a provisioning::Profile>,
+}
+
+pub(in crate::updater) async fn sign_for_install(
+  home: &Path,
+  archive: &Path,
+  app_version: &str,
+  target: DesktopTarget,
+  staging: &Path,
+  options: DesktopSigningOptions<'_>,
+) -> io::Result<PathBuf> {
+  let DesktopSigningOptions {
+    mode,
+    interactive,
+    profile,
+  } = options;
+  validate_build_name(app_version)?;
+  let arch = target_architecture(target)?;
+  with_signing_signals(async |runner| {
+    let mut scratch = Scratch::allocate(&staging.join("signed-app"))?;
+    let stage = &scratch.stage;
+    let app = if mode == SigningMode::DeveloperId {
+      let credentials = developer_id_credentials(runner).await?;
+      stage_signed_app(runner, archive, app_version, &credentials, stage, arch)
+        .await?
+        .0
+    } else {
+      let app = stage_input(archive, app_version, stage).await?;
+      let helper_app = app.join(HELPER_APP);
+      let binary = helper_app.join(HELPER_EXECUTABLE);
+      if let Some(profile) = profile {
+        helper::sign(
+          &binary,
+          &helper_app,
+          stage,
+          app_version,
+          helper::Identity::Development(&profile.path),
+          runner,
+        )
+        .await?;
+      } else if mode == SigningMode::Provision {
+        sign_provisioned_helper(
+          runner,
+          home,
+          DevelopmentHelper {
+            binary: &binary,
+            app: &helper_app,
+            stage,
+            version: app_version,
+            expected_team: None,
+            interactive,
+          },
+        )
+        .await?;
+      } else {
+        helper::sign(
+          &binary,
+          &helper_app,
+          stage,
+          app_version,
+          helper::Identity::AdHoc,
+          runner,
+        )
+        .await?;
+      }
+      sign_app(runner, &app, "-").await?;
+      app
+    };
+    let assets = scratch.stage.join("assets");
+    private_fs::create_directory(&assets)?;
+    let name = "app.tar.gz";
+    pack_archive(
+      runner,
+      &app,
+      &scratch.stage,
+      &assets.join(name),
+      app_version,
+      arch,
+      mode,
+    )
+    .await?;
+    runner.check()?;
+    scratch.finish(&assets)?;
+    Ok(scratch.output.join(name))
+  })
+  .await
+}
+
+pub(in crate::updater) async fn sign_runtime_helper(
+  home: &Path,
+  binary: &Path,
+  output_app: &Path,
+  version: &str,
+  mode: SigningMode,
+  interactive: bool,
+) -> io::Result<String> {
+  validate_build_name(version)?;
+  let stage = output_app.parent().ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "ctld.app has no staging directory",
+    )
+  })?;
+  with_signing_signals(async |runner| match mode {
+    SigningMode::DeveloperId => {
+      let credentials = developer_id_credentials(runner).await?;
+      helper::sign(
+        binary,
+        output_app,
+        stage,
+        version,
+        helper::Identity::DeveloperId(&credentials.profile),
+        runner,
+      )
+      .await?;
+      notarize_app(runner, output_app, stage, &credentials).await?;
+      let details = runner
+        .output(
+          Command::new("/usr/bin/codesign")
+            .args(["--display", "--verbose=2"])
+            .arg(output_app),
+        )
+        .await?;
+      String::from_utf8_lossy(&details.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .filter(|team| {
+          team.len() == 10
+            && team
+              .bytes()
+              .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("ctld signing did not report an Apple Team ID"))
+    }
+    SigningMode::Provision => {
+      sign_provisioned_helper(
+        runner,
+        home,
+        DevelopmentHelper {
+          binary,
+          app: output_app,
+          stage,
+          version,
+          expected_team: None,
+          interactive,
+        },
+      )
+      .await
+    }
+    SigningMode::AdHoc => Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "Ad hoc runtime signing expects a standalone executable.",
+    )),
+  })
+  .await
+}
+
+struct DevelopmentHelper<'a> {
+  binary: &'a Path,
+  app: &'a Path,
+  stage: &'a Path,
+  version: &'a str,
+  expected_team: Option<&'a str>,
+  interactive: bool,
+}
+
+async fn sign_provisioned_helper(
+  runner: &Runner,
+  home: &Path,
+  input: DevelopmentHelper<'_>,
+) -> io::Result<String> {
+  let profile = provisioning::profile(
+    runner,
+    home,
+    input.stage,
+    input.expected_team.map_or(
+      provisioning::TeamSelection::Reuse,
+      provisioning::TeamSelection::Installed,
+    ),
+    input.interactive,
+  )
+  .await?;
+  helper::sign(
+    input.binary,
+    input.app,
+    input.stage,
+    input.version,
+    helper::Identity::Development(&profile.path),
+    runner,
+  )
+  .await?;
+  Ok(profile.team)
+}
+
+pub(in crate::updater) async fn select_provisioning(
+  home: &Path,
+  reselect: bool,
+  interactive: bool,
+) -> io::Result<provisioning::Profile> {
+  let selection = if reselect {
+    provisioning::TeamSelection::Reselect
+  } else {
+    provisioning::TeamSelection::Reuse
+  };
+  with_signing_signals(async |runner| {
+    provisioning::select_profile(runner, home, selection, interactive).await
+  })
+  .await
+}
+
+pub(in crate::updater) async fn checkout_profile(
+  home: &Path,
+  interactive: bool,
+) -> io::Result<Option<provisioning::Profile>> {
+  if !interactive || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+    return Ok(None);
+  }
+  select_provisioning(home, false, true).await.map(Some)
+}
+
+pub(in crate::updater) async fn sign_checkout_helper(
+  home: &Path,
+  artifact: &Path,
+  output: &Path,
+  version: &str,
+  interactive: bool,
+) -> io::Result<()> {
+  validate_build_name(version)?;
+  let inherited_group =
+    std::env::var_os("CTLUP_DEVELOPMENT_LIFELINE").is_some_and(|value| value == "1");
+  with_signing_process_group(inherited_group, async |runner| {
+    let mut scratch = Scratch::allocate(output)?;
+    let artifact = snapshot_checkout_helper(artifact, &scratch.stage)?;
+    let component = ctl_core::executable::inspect(&artifact).await?;
+    if component.build.version != version {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "ctld version differs from the checkout build",
+      ));
+    }
+    let assets = scratch.stage.join("helper");
+    private_fs::create_directory(&assets)?;
+    let app = assets.join("ctld.app");
+    let team = sign_provisioned_helper(
+      runner,
+      home,
+      DevelopmentHelper {
+        binary: &artifact,
+        app: &app,
+        stage: &scratch.stage,
+        version,
+        expected_team: None,
+        interactive,
+      },
+    )
+    .await?;
+    let receipt = ctl_client::development::write_development_helper_receipt(
+      &assets,
+      &component,
+      ctl_core::paths::native_target(),
+      &team,
+    )?;
+    let verified = ctl_client::setup::inspect_ctld_package(home, &assets, &receipt)
+      .await
+      .map_err(io::Error::other)?;
+    if verified.build != component.build
+      || !ctl_core::component::protocols_match(&verified.protocols, &component.protocols)
+    {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "signed helper differs from the checkout build",
+      ));
+    }
+    runner.check()?;
+    scratch.finish(&assets)
+  })
+  .await
+}
+
+fn snapshot_checkout_helper(source: &Path, stage: &Path) -> io::Result<PathBuf> {
+  let limit = ctl_core::bundles::MAX_FILE_BYTES as u64;
+  let input = private_fs::options().read(true).open(source)?;
+  let metadata = input.metadata()?;
+  if !metadata.is_file()
+    || !private_fs::is_executable(&metadata)
+    || !(1..=limit).contains(&metadata.len())
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "invalid checkout ctld executable",
+    ));
+  }
+  let artifact = stage.join("ctld");
+  let mut file = private_fs::options()
+    .create_new(true)
+    .write(true)
+    .open(&artifact)?;
+  if io::copy(&mut input.take(limit + 1), &mut file)? != metadata.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "checkout ctld changed while copying",
+    ));
+  }
+  private_fs::set_executable(&file)?;
+  Ok(artifact)
+}
+
+pub(in crate::updater) async fn sign_ad_hoc_executable(binary: &Path) -> io::Result<()> {
+  with_signing_signals(async |runner| sign_code(runner, binary, "-").await).await
+}
+
+async fn renew_development(runner: &Runner, home: &Path, json: bool) -> io::Result<()> {
+  let prepared = ctl_client::development::renew_signing(
+    home,
+    async |binary, app, version, team| {
+      let stage = app
+        .parent()
+        .ok_or_else(|| io::Error::other("ctld.app has no staging directory"))?;
+      sign_provisioned_helper(
+        runner,
+        home,
+        DevelopmentHelper {
+          binary,
+          app,
+          stage,
+          version,
+          expected_team: Some(team),
+          interactive: !json,
+        },
+      )
+      .await?;
+      runner.check()
+    },
+    || runner.check(),
+  )
+  .await?;
   let result = &prepared.result;
   if json {
     crate::updater::print_json(result)?;
@@ -590,14 +1082,39 @@ async fn renew_development(home: &Path, workspace: Option<PathBuf>, json: bool) 
   Ok(())
 }
 
-async fn sign(runner: &Runner, home: &Path, options: SignArguments) -> io::Result<()> {
-  let Some(version) = options.version else {
-    return runner
-      .cancellable(renew_development(home, options.workspace, options.json))
-      .await;
-  };
-  let version = version.strip_prefix('v').unwrap_or(&version);
-  desktop::validate_macos_release_version(version)?;
+pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
+  if options.team {
+    let profile = select_provisioning(home, true, !options.json).await?;
+    if options.json {
+      return crate::updater::print_json(&serde_json::json!({
+        "status": "provisioned",
+        "team_identifier": profile.team,
+      }));
+    }
+    println!("Apple Team {} is ready for local signing.", profile.team);
+    return Ok(());
+  }
+  let mode = options.signing.mode();
+  let implicit_development = mode.is_none()
+    && options.channel.is_none()
+    && options.version.is_none()
+    && options.workspace.is_none()
+    && Installations::new(home)
+      .active()?
+      .is_some_and(|bundle| bundle.manifest.source == Source::Local);
+  if options.workspace.is_some() || implicit_development {
+    return with_signing_signals(async |runner| {
+      renew_development(runner, home, options.json).await
+    })
+    .await;
+  }
+  let version = options
+    .version
+    .as_deref()
+    .map(|version| version.strip_prefix('v').unwrap_or(version));
+  if let Some(version) = version {
+    ctl_client::remote_bundle::desktop::validate_macos_release_version(version)?;
+  }
   let target = match options.target.as_deref() {
     Some("aarch64-apple-darwin") => DesktopTarget::MacArm64,
     Some("x86_64-apple-darwin") => DesktopTarget::MacX64,
@@ -609,18 +1126,29 @@ async fn sign(runner: &Runner, home: &Path, options: SignArguments) -> io::Resul
       ));
     }
   };
-  let credentials = SigningCredentials::load()?;
-  finish_signing(runner, home, version, target, &credentials, options.json).await
+  crate::updater::app::sign_cached(home, options.channel, version, target, mode, options.json).await
 }
 
-pub(super) async fn run(home: &Path, options: SignArguments) -> io::Result<()> {
+async fn with_signing_signals<T>(
+  operation: impl AsyncFnOnce(&Runner) -> io::Result<T>,
+) -> io::Result<T> {
+  with_signing_process_group(false, operation).await
+}
+
+async fn with_signing_process_group<T>(
+  inherited_group: bool,
+  operation: impl AsyncFnOnce(&Runner) -> io::Result<T>,
+) -> io::Result<T> {
   use tokio::signal::unix::{SignalKind, signal};
 
   let mut interrupt = signal(SignalKind::interrupt())?;
   let mut terminate = signal(SignalKind::terminate())?;
   let (stop, cancelled) = watch::channel(false);
-  let runner = Runner(cancelled);
-  let signing = sign(&runner, home, options);
+  let runner = Runner {
+    cancellation: cancelled,
+    inherited_group,
+  };
+  let signing = operation(&runner);
   tokio::pin!(signing);
   tokio::select! {
     result = &mut signing => return result,
@@ -641,6 +1169,51 @@ mod tests {
       .join("../../target")
       .join(format!("test-ctlup-sign-{}", uuid::Uuid::new_v4()));
     Scratch::allocate(&output).unwrap()
+  }
+
+  #[test]
+  fn automatic_signing_requires_a_developer_id_application_identity() {
+    let fingerprint = "A".repeat(40);
+    assert!(developer_id_listed(&format!(
+      "  1) {fingerprint} \"Developer ID Application: Example\"\n     1 valid identities found"
+    )));
+    for identity in [
+      format!("  1) {fingerprint} \"Apple Development: Example\""),
+      format!("  1) {fingerprint} \"Developer ID Installer: Example\""),
+      "  1) INVALID \"Developer ID Application: Example\"".to_owned(),
+      "  0 valid identities found".to_owned(),
+    ] {
+      assert!(!developer_id_listed(&identity));
+    }
+  }
+
+  #[test]
+  fn local_nightly_identity_is_safe_for_export_paths() {
+    let package = DesktopInput {
+      archive: Path::new("package"),
+      app_version: "0.1.5",
+      bundle_id: "0.1.5-nightly.20261126+gabcd1234abcd",
+      source_revision: "abcd1234abcd1234abcd1234abcd1234abcd1234",
+      installation_layout_version: None,
+      target: DesktopTarget::MacArm64,
+    };
+    assert_eq!(signing_architecture(package).unwrap(), "arm64");
+    for bundle_id in ["../0.1.5", "0.1.5/../other", "0.1.5\nother"] {
+      assert!(
+        signing_architecture(DesktopInput {
+          bundle_id,
+          ..package
+        })
+        .is_err()
+      );
+    }
+    assert!(
+      signing_architecture(DesktopInput {
+        source_revision: "UNVERIFIED",
+        ..package
+      })
+      .is_err()
+    );
   }
 
   #[test]
@@ -683,7 +1256,10 @@ mod tests {
     let scratch = scratch();
     let pid_file = scratch.stage.join("worker.pid");
     let (stop, cancelled) = watch::channel(false);
-    let runner = Runner(cancelled);
+    let runner = Runner {
+      cancellation: cancelled,
+      inherited_group: false,
+    };
     let mut command = Command::new("/bin/sh");
     command
       .args([

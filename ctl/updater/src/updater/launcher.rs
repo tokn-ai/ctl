@@ -36,6 +36,7 @@ pub(super) fn dispatch() -> io::Result<Option<i32>> {
     // Bootstrap can read a retained updater even when the selected one is missing.
     return Ok(None);
   }
+  let mut ad_hoc_helper = None;
   let (path, _lease) = if name == "ctlup" {
     installations
       .manager_and_lease()?
@@ -44,6 +45,15 @@ pub(super) fn dispatch() -> io::Result<Option<i32>> {
     let (bundle, lease) = installations
       .active_and_lease()?
       .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no active ctl installation"))?;
+    if cfg!(target_os = "macos")
+      && matches!(name.as_str(), "ctl" | "ctmux")
+      && env::var_os("CTLD_BIN").is_none()
+      && bundle.macos_ad_hoc_helper()?
+    {
+      // Published clients may predate the explicit ad hoc runtime receipt.
+      // Give them the verified executable held by this launcher's lease.
+      ad_hoc_helper = bundle.executable("ctld");
+    }
     let signed_helper = "ctld.app/Contents/MacOS/ctld";
     let path = if cfg!(target_os = "macos")
       && name == "ctld"
@@ -68,7 +78,12 @@ pub(super) fn dispatch() -> io::Result<Option<i32>> {
     super::print_updater_digest(&path)?;
     return Ok(Some(0));
   }
-  let status = Command::new(path).args(env::args_os().skip(1)).status()?;
+  let mut command = Command::new(path);
+  command.args(env::args_os().skip(1));
+  if let Some(executable) = ad_hoc_helper {
+    command.env("CTLD_BIN", executable);
+  }
+  let status = command.status()?;
   #[cfg(unix)]
   let code = status.code().or_else(|| {
     use std::os::unix::process::ExitStatusExt as _;

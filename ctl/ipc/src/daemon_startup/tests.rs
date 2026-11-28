@@ -210,7 +210,11 @@ mod unix {
     let pid_file = fixture.directory.join("exited-child");
     let mut command = Command::new("/bin/sh");
     command
-      .args(["-c", "printf '%s' \"$$\" > \"$1\"; exit 17", "reaper-test"])
+      .args([
+        "-c",
+        "set -e; printf '%s' \"$$\" > \"$1.tmp\"; /bin/mv \"$1.tmp\" \"$1\"; exit 17",
+        "reaper-test",
+      ])
       .arg(&pid_file);
     spawn_reaped(command, None).await.unwrap();
     wait_until(|| pid_file.exists()).await;
@@ -332,7 +336,9 @@ mod unix {
       .append(true)
       .open(directory.join("started"))
       .unwrap();
-    writeln!(started, "{}", std::process::id()).unwrap();
+    started
+      .write_all(format!("{}\n", std::process::id()).as_bytes())
+      .unwrap();
     drop(started);
     timeout(Duration::from_secs(10), async {
       while !directory.join("ready").exists() {

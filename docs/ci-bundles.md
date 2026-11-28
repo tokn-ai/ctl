@@ -307,22 +307,53 @@ Use a Mac with Xcode's `notarytool` and `stapler`, a Developer ID Application
 certificate and its private key in the Keychain, the matching distribution
 profile for `ctld`, and an Apple notary API key.
 Set `CTLD_PROVISIONING_PROFILE`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY`, and
-`APPLE_API_ISSUER` locally. The build job can publish the unsigned files without
-access to those credentials.
+`APPLE_API_ISSUER` locally. The build job can publish unsigned files. On a Mac
+with those credentials and a Developer ID identity, `ctlup install` and
+`ctlup update` sign and notarize an unsigned native package before activation.
+Already signed release packages are verified as shipped. Missing credentials
+or a signing failure preserves the previous active selection.
+
+Use `--provision` to sign `ctld` for this Mac using an Apple Development
+certificate and a matching Xcode provisioning profile. Sign in to Xcode on
+first use. If several eligible teams are available, `ctlup` asks which one to
+use. The selected Team ID is saved in
+`$CTL_DATA_DIR/ctlup/signing/provisioning-team` for both runtime and desktop
+signing. Run `ctlup sign --provision --team` in a terminal to set up or change
+the Team before or after installing a build. Press Enter to keep the saved
+team when prompted. This command prepares the team's profile. For build
+signing, `CTLD_PROVISIONING_PROFILE` overrides the saved team. Free Personal
+Team profiles expire after seven days and can be renewed through Xcode. Use
+`--ad-hoc` to apply a local signature without an Apple account.
+An ad hoc helper cannot access the protected Keychain for saved credentials or
+Touch ID approval. Updates reuse the selected installation mode.
 
 ```sh
-ctlup sign --version VERSION
+ctlup sign --provision --team
+ctlup install app --channel nightly --provision
+ctlup install --channel nightly --ad-hoc
+ctlup sign --channel nightly --provision
+ctlup sign --version BUILD_ID
 ```
 
-Select the tagged release with `--version`. The target defaults to the Mac's
-architecture. To sign the Intel build from an Apple Silicon Mac, add
-`--target x86_64-apple-darwin`.
+Run `ctlup sign --provision` separately to sign a local copy of an eligible
+active desktop build from the cache. Add `--channel` to sign the last cached
+build for that channel or `--version` to sign an exact build ID, including a
+Nightly build ID. The target defaults to the Mac's architecture. Add
+`--target x86_64-apple-darwin` when that target's archive is cached locally.
 
-The command downloads and verifies the unsigned build from the exact GitHub
-release, then signs, notarizes, and staples the app and a new DMG. It prints
-the output path under `~/.tokn/ctl/ctlup/signed/v<VERSION>/<TARGET>/`, or under
-the selected `CTL_DATA_DIR` profile. The signed packages, checksums, and release
-manifest are ready to attach to the GitHub release. Existing output is preserved.
+With Developer ID, the command verifies the unsigned cached archive, signs and
+notarizes the app, and exports its archive, a new DMG, checksums, and a release
+manifest. It prints the output path under
+`~/.tokn/ctl/ctlup/signed/v<BUILD_ID>/<TARGET>/`, or under the selected
+`CTL_DATA_DIR` profile. The active app selection is preserved. An upstream
+package that is already signed reports that status. Existing output is preserved.
+With `--provision` or `--ad-hoc`, signing caches a locally signed archive for
+future installation.
+
+Signing reads the app archive locally and contacts Apple for notarization.
+Profile renewal can also require network access. Automatically signed
+installations keep a separate archive digest for the signed bytes and retain
+the original publication identity for update checks and repair.
 
 ## Standalone helper release assets
 
@@ -349,16 +380,18 @@ checksum before changing release attachments.
 
 ## Native development installations
 
-For local macOS CLI and GUI development, run the shared provisioning commands
-from the repository root:
+Run `ctlup dev` from the repository root to prepare a native macOS build for
+CLI and GUI development.
 
 ```sh
-pnpm ctld:provision
-# In Xcode, choose your team in Signing & Capabilities and build once.
-pnpm ctld:build
+ctlup dev
 ~/.tokn/ctl/bin/ctl passwords
 ~/.tokn/ctl/bin/ctlup status --json
 ```
+
+If `ctlup` opens the shared provisioning project, select your Apple Team in
+Xcode under **Signing & Capabilities**, build the provisioning target once, and
+rerun `ctlup dev`.
 
 For GUI development, `pnpm desktop:dev` delegates native preparation to
 `ctlup dev` on macOS and Linux. On Unix, `pnpm daemons:build` also uses that
@@ -369,8 +402,8 @@ same complete-build path for CLI development.
 
 The manager compiles all six runtime commands and `ctlup` from the working tree,
 snapshots Cargo's actual outputs, then strips and verifies those copies. On
-macOS it finds or refreshes the provisioning profile, chooses its matching
-Keychain certificate, and signs the copied `ctld.app`. The resulting receipt
+macOS it uses the same development provisioning code as `--provision` to find
+or renew the profile and sign the copied `ctld.app`. The resulting receipt
 binds its revision, source fingerprint, dirty flag, and protocol metadata.
 The CLI and GUI can remain unsigned; no notarization credentials are needed.
 
@@ -383,8 +416,8 @@ hold an installation lease while using its exact executable paths. Active,
 registered, and running builds remain available after Cargo outputs are cleaned.
 
 The runtime checks signature, provisioning expiry, certificate identity, source
-metadata, and API compatibility. Run `ctlup sign` from the checkout to renew
-the active development runtime's `ctld` signature when the profile expires.
+metadata, and API compatibility. Run `ctlup sign` to renew the active
+development runtime's `ctld` signature with its existing Apple Team.
 Restart `ctld` separately to use the renewed helper.
 [Local development builds](local-bundles.md#renew-the-active-development-helpers-signature)
 

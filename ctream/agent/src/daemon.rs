@@ -5,9 +5,13 @@ mod capture;
 mod server;
 #[cfg(any(target_os = "linux", windows))]
 pub use capture::stream as capture_stream;
+mod context;
 mod endpoint;
+mod generation;
 mod observer;
+mod transport;
 pub use authority::{Authority, Delegate};
+pub use generation::{standby, status, upgrade};
 pub use observer::{SourceControl, SourceEvent, SourceObserver};
 #[cfg(target_os = "linux")]
 pub(crate) struct HelperHandles {
@@ -23,7 +27,6 @@ use ctream_proto::{
   live::{LiveAction, LiveEvent, Participant},
   valid_agent_id, valid_window_id,
 };
-use interprocess::local_socket::tokio::Stream;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
   io::{self, BufRead as _, Read, Write},
@@ -36,6 +39,7 @@ use tokio::{
   sync::mpsc,
   time::timeout,
 };
+use transport::Stream;
 
 const CONTROL_LIMIT: usize = 4096;
 const EVENT_LIMIT: usize = ctream_proto::live::RECORD_LIMIT;
@@ -87,9 +91,17 @@ impl Mode {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 enum Opening {
+  Lane {
+    format: u32,
+    lane: uuid::Uuid,
+    resume: bool,
+  },
+  Maintenance {
+    maintenance: generation::Maintenance,
+  },
   #[cfg(any(target_os = "linux", windows))]
   Capture {
     source: capture::SourceKey,
@@ -109,7 +121,7 @@ enum Opening {
   },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Join {
   room: Room,
@@ -192,9 +204,13 @@ async fn write_json<T: Serialize>(
 }
 
 async fn join(request: &Join) -> io::Result<BufReader<Stream>> {
-  let mut stream = BufReader::new(endpoint::connect().await?);
+  let mut stream = BufReader::new(transport::connect(None, false).await?);
   write_json(stream.get_mut(), request).await?;
-  let admitted: Option<bool> = timeout(IO_TIMEOUT, read_json(&mut stream, 16)).await??;
+  let admitted: Option<bool> = stream
+    .get_ref()
+    .reply_deadline(IO_TIMEOUT)
+    .wait(read_json(&mut stream, 16))
+    .await??;
   if admitted != Some(true) {
     return Err(io::Error::other("desktop daemon declined registration"));
   }
@@ -208,11 +224,16 @@ pub fn ensure_daemon() -> io::Result<()> {
 
 /// Entry point for the independently launched, idle-exiting host process.
 pub fn run_daemon() -> io::Result<()> {
+  detach_session()?;
+  runtime()?.block_on(server::serve())
+}
+
+fn detach_session() -> io::Result<()> {
   #[cfg(unix)]
   if rustix::process::getpgrp() != rustix::process::getpid() {
     rustix::process::setsid()?;
   }
-  runtime()?.block_on(server::serve())
+  Ok(())
 }
 
 /// An SDK session advertises its presence without subscribing to the event stream.
@@ -248,19 +269,22 @@ impl Publisher {
     let result = self.runtime.block_on(async {
       // The caller holds the host action lock. Bound the round trip while
       // ordering events from independent SDK clients at the daemon.
-      timeout(Duration::from_millis(400), async {
-        write_json(stream.get_mut(), action).await?;
-        match read_json::<bool>(&mut stream, 16).await? {
-          Some(true) => Ok(()),
-          _ => Err(invalid("live publication was not acknowledged")),
-        }
-      })
-      .await?
+      stream
+        .get_ref()
+        .reply_deadline(Duration::from_millis(400))
+        .wait(async {
+          write_json(stream.get_mut(), action).await?;
+          match read_json::<bool>(&mut stream, 16).await? {
+            Some(true) => Ok(()),
+            _ => Err(invalid("live publication was not acknowledged")),
+          }
+        })
+        .await?
     });
     if result.is_ok() {
       self.stream = Some(stream);
     } else {
-      endpoint::discard_pending(stream.get_ref());
+      stream.get_ref().discard_pending();
     }
     result
   }
@@ -320,7 +344,10 @@ fn serve_mode(
   let runtime = runtime()?;
   runtime.block_on(async {
     let mut stream = join(&request).await?;
-    let snapshot: LiveEvent = timeout(IO_TIMEOUT, read_json(&mut stream, EVENT_LIMIT))
+    let snapshot: LiveEvent = stream
+      .get_ref()
+      .reply_deadline(IO_TIMEOUT)
+      .wait(read_json(&mut stream, EVENT_LIMIT))
       .await??
       .ok_or_else(|| invalid("desktop daemon ended before the roster"))?;
     let mut deliver = |event: &LiveEvent| -> io::Result<()> {

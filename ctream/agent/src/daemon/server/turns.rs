@@ -5,6 +5,7 @@ use crate::daemon::{
   invalid,
 };
 use ctream_proto::live::{LiveEvent, MAX_TURN_MS, Participant};
+use serde::{Deserialize, Serialize};
 use std::{
   io,
   time::{Duration, SystemTime, UNIX_EPOCH},
@@ -37,9 +38,54 @@ impl Room {
 pub(super) struct Lease {
   key: String,
   token: String,
+  reference: String,
   owner: Participant,
   end: Instant,
   wall_end: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SavedLease {
+  key: String,
+  token: String,
+  reference: String,
+  owner: Participant,
+  expires_at_ms: u64,
+  monotonic_deadline_ns: u64,
+}
+
+fn wall_ms() -> u64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_millis() as u64
+}
+
+// Planned handoff stays on the same host and boot. A wall-clock adjustment
+// during the cutover must never renew (or prematurely expire) a control turn.
+#[cfg(unix)]
+fn monotonic_ns() -> io::Result<u64> {
+  let stamp = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+  Ok(stamp.tv_sec as u64 * 1_000_000_000 + stamp.tv_nsec as u64)
+}
+
+#[cfg(windows)]
+fn monotonic_ns() -> io::Result<u64> {
+  use windows_sys::Win32::System::Performance::{
+    QueryPerformanceCounter, QueryPerformanceFrequency,
+  };
+  let mut ticks = 0;
+  let mut freq = 0;
+  // SAFETY: both APIs initialize the supplied writable 64-bit integer.
+  if unsafe { QueryPerformanceFrequency(&mut freq) } == 0
+    || unsafe { QueryPerformanceCounter(&mut ticks) } == 0
+    || freq <= 0
+    || ticks < 0
+  {
+    return Err(io::Error::last_os_error());
+  }
+  Ok((ticks as u128 * 1_000_000_000 / freq as u128) as u64)
 }
 pub(super) struct Gesture {
   key: String,
@@ -69,6 +115,71 @@ fn stale() -> Reply {
 }
 
 impl State {
+  pub(super) fn save_leases(&self) -> io::Result<Vec<SavedLease>> {
+    let stamp = monotonic_ns()?;
+    let now = Instant::now();
+    let mut saved = Vec::new();
+    for turns in self.turns.values() {
+      if turns.gesture.is_some() {
+        return Err(io::Error::new(
+          io::ErrorKind::WouldBlock,
+          "desktop gesture still active",
+        ));
+      }
+      if let Some(lease) = &turns.lease {
+        saved.push(SavedLease {
+          key: lease.key.clone(),
+          token: lease.token.clone(),
+          reference: lease.reference.clone(),
+          owner: lease.owner.clone(),
+          expires_at_ms: lease.wall_end,
+          monotonic_deadline_ns: stamp + lease.end.saturating_duration_since(now).as_nanos() as u64,
+        });
+      }
+    }
+    Ok(saved)
+  }
+
+  pub(super) fn restore_leases(&mut self, leases: &[SavedLease]) -> io::Result<()> {
+    let now = Instant::now();
+    let stamp = monotonic_ns()?;
+    for saved in leases {
+      let route = self
+        .controllers
+        .get(&saved.key)
+        .ok_or_else(|| invalid("missing handoff turn controller"))?;
+      let remaining = Duration::from_nanos(saved.monotonic_deadline_ns.saturating_sub(stamp));
+      if route.participant != saved.owner.participant_id
+        || !self
+          .rooms
+          .get(&route.source)
+          .and_then(|r| r.get(&saved.owner.participant_id))
+          .is_some_and(|m| m.participant == saved.owner)
+        || [saved.key.as_str(), &saved.token, &saved.reference]
+          .iter()
+          .any(|s| Uuid::try_parse(s).is_err())
+        || remaining > Duration::from_millis(MAX_TURN_MS)
+      {
+        return Err(invalid("invalid handoff turn"));
+      }
+      let turns = self.turns.entry(route.source.domain()).or_default();
+      if turns.lease.is_some() {
+        return Err(invalid("duplicate handoff turn"));
+      }
+      turns.lease = Some(Lease {
+        key: saved.key.clone(),
+        token: saved.token.clone(),
+        reference: saved.reference.clone(),
+        owner: saved.owner.clone(),
+        end: now + remaining,
+        wall_end: saved.expires_at_ms,
+      });
+    }
+    // Queue real expirations for suspended watchers before they reattach.
+    self.expire(now);
+    self.timer.notify_one();
+    Ok(())
+  }
   pub(super) fn turn_event(&self, room: &Room) -> LiveEvent {
     let lease = self
       .turns
@@ -93,6 +204,9 @@ impl State {
     }
   }
   pub(super) fn expire(&mut self, now: Instant) {
+    if self.expiry_paused {
+      return;
+    }
     let mut changed = Vec::new();
     for (&domain, turn) in &mut self.turns {
       if turn.lease.as_ref().is_some_and(|lease| lease.end <= now) {
@@ -128,11 +242,15 @@ pub(super) async fn expire_leases(rooms: Rooms) {
     let deadline = {
       let mut state = rooms.state.lock().unwrap();
       state.expire(Instant::now());
-      state
-        .turns
-        .values()
-        .filter_map(|turn| turn.lease.as_ref().map(|lease| lease.end))
-        .min()
+      if state.expiry_paused {
+        None
+      } else {
+        state
+          .turns
+          .values()
+          .filter_map(|turn| turn.lease.as_ref().map(|lease| lease.end))
+          .min()
+      }
     };
     if let Some(deadline) = deadline {
       tokio::select! {_=timer.notified()=>{},_=tokio::time::sleep_until(deadline)=>{}}
@@ -154,6 +272,13 @@ impl super::Desktop {
 }
 
 impl Membership {
+  pub(super) fn turn_lease(&self) -> Option<(String, String, Instant)> {
+    let key = self.key.as_ref()?;
+    let state = self.rooms.state.lock().unwrap();
+    let lease = state.turns.get(&self.room.domain())?.lease.as_ref()?;
+    (&lease.key == key && lease.end > Instant::now())
+      .then(|| (lease.token.clone(), lease.reference.clone(), lease.end))
+  }
   pub(super) fn command(&self, command: Command) -> Reply {
     self.command_locked(&mut self.rooms.state.lock().unwrap(), command)
   }
@@ -215,16 +340,13 @@ impl Membership {
           return busy(&gesture.owner);
         }
         let token = Uuid::new_v4().to_string();
-        let wall_now = SystemTime::now()
-          .duration_since(UNIX_EPOCH)
-          .unwrap_or_default()
-          .as_millis() as u64;
         turn.lease = Some(Lease {
           key: key.clone(),
           token: token.clone(),
+          reference: Uuid::new_v4().to_string(),
           owner: self.participant.clone(),
           end: now + Duration::from_millis(ttl_ms),
-          wall_end: wall_now.saturating_add(ttl_ms),
+          wall_end: wall_ms().saturating_add(ttl_ms),
         });
         state.notify_turn(domain);
         Reply::value(token)

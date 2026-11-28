@@ -20,6 +20,22 @@ fn run() -> ctream_driver::Result<()> {
   if args == ["daemon"] {
     return Ok(ctream_agent::daemon::run_daemon()?);
   }
+  if args.first().is_some_and(|arg| arg == "daemon") {
+    use ctream_agent::daemon;
+    match &args[1..] {
+      [op] if op == "status" => daemon::status()?,
+      [op] if op == "upgrade" => daemon::upgrade(None)?,
+      [op, path] if op == "upgrade" => daemon::upgrade(Some(path))?,
+      [op] if op == "standby" => {
+        if let Err(error) = daemon::standby() {
+          println!("{}", serde_json::to_string(&error.to_string())?);
+          return Err(error.into());
+        }
+      }
+      _ => return Err("usage: ctream-agent daemon [status | upgrade [EXECUTABLE]]".into()),
+    }
+    return Ok(());
+  }
   #[cfg(windows)]
   if args == ["ensure-daemon"] {
     return Ok(ctream_agent::daemon::ensure_daemon()?);

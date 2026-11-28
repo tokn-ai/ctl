@@ -140,6 +140,14 @@ failed batch can have partial effects. History retains the newest 10,000
 mutations. Typed text, keys, coordinates, and screenshots stay out of history.
 
 The display host starts `ctream-agent daemon` when the first client needs it.
+An online host upgrade keeps the same SDK session, watch iterator and participant
+identity. Screenshots can briefly show the last frame. An open `withTurn()`
+keeps its original deadline, and dispatched input keeps its original audit ID.
+The host operator runs `ctream-agent daemon upgrade` from the desired agent
+installation. The running daemon, successor and host-side session relays must
+support handoff. For a legacy installation, activate the update after the
+existing sessions have finished.
+
 The daemon admits and dispatches each input request and owns its audit record.
 With `turns: true`, a successful mutation returns an `ActionReceipt` whose
 `action_id` also appears on its overlay event when one is emitted. A journaled

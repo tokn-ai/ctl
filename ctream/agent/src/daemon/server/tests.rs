@@ -1,4 +1,5 @@
 use super::*;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 #[cfg(unix)]
 mod restart;
@@ -488,5 +489,84 @@ fn confirmed_observers_receive_only_host_recorded_input() {
     .unwrap();
   assert!(
     matches!(&*events.try_recv().unwrap(), LiveEvent::Action { action_id:Some(id), .. } if id == &action_id)
+  );
+}
+
+#[tokio::test]
+async fn handoff_drains_observer_events_and_resumes_queued_input_after_rollback() {
+  use ctream_proto::live::LiveAction;
+  use lane::{Gate, Phase};
+  let rooms = Rooms::default();
+  let gate = Gate::new(Uuid::new_v4(), None);
+  let request = request("viewer");
+  let viewer = request.participant.clone();
+  let (socket, client) = tokio::io::duplex(8192);
+  let handler = tokio::spawn({
+    let rooms = rooms.clone();
+    let gate = gate.clone();
+    async move {
+      let (reader, mut writer) = tokio::io::split(socket);
+      serve_opened(
+        Opening::Join(request),
+        rooms,
+        &mut BufReader::new(reader),
+        &mut writer,
+        &gate,
+      )
+      .await
+    }
+  });
+  let mut client = BufReader::new(client);
+  assert_eq!(
+    read_json::<bool>(&mut client, 16).await.unwrap(),
+    Some(true)
+  );
+  assert!(matches!(
+    read_json::<LiveEvent>(&mut client, 4096).await.unwrap(),
+    Some(LiveEvent::Snapshot { .. })
+  ));
+  let actor = controller(&rooms, ":1", None);
+  assert_eq!(
+    read_json::<LiveEvent>(&mut client, 4096).await.unwrap(),
+    Some(LiveEvent::Joined {
+      participant: actor.participant.clone()
+    })
+  );
+
+  gate.set_phase(Phase::DrainInput);
+  gate.wait_paused(Phase::DrainInput).await.unwrap();
+  let action = LiveAction::Move { point: [0.2, 0.5] };
+  write_json(client.get_mut(), &action).await.unwrap();
+  actor.publish(action).unwrap();
+  gate.set_phase(Phase::Freeze);
+  gate.wait_paused(Phase::Freeze).await.unwrap();
+  let delivered = |participant_id| {
+    Some(LiveEvent::Action {
+      participant_id,
+      action,
+      action_id: None,
+    })
+  };
+  assert_eq!(
+    read_json::<LiveEvent>(&mut client, 4096).await.unwrap(),
+    delivered(actor.id.clone())
+  );
+
+  gate.set_phase(Phase::Running);
+  assert_eq!(
+    read_json::<LiveEvent>(&mut client, 4096).await.unwrap(),
+    delivered(viewer.participant_id)
+  );
+  gate.set_phase(Phase::DrainInput);
+  gate.wait_paused(Phase::DrainInput).await.unwrap();
+  gate.set_phase(Phase::Freeze);
+  gate.wait_paused(Phase::Freeze).await.unwrap();
+  gate.set_phase(Phase::Commit);
+  handler.await.unwrap().unwrap();
+  assert!(
+    read_json::<LiveEvent>(&mut client, 4096)
+      .await
+      .unwrap()
+      .is_none()
   );
 }

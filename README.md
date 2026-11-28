@@ -300,6 +300,23 @@ capture subscriptions share a native producer. A slow viewer can skip frames
 while other viewers and input continue. The daemon exits after 30 seconds
 without client connections.
 
+Run `ctream-agent daemon status` on the display host to see the running
+generation, executable, participants, turn holders and selected executable.
+The command also works while the daemon is offline. To switch builds, run
+`ctream-agent daemon upgrade` from the new installation, or pass the path to
+its executable as `ctream-agent daemon upgrade PATH`. Keep that installation
+available for the next cold start.
+
+During a planned upgrade, the viewer can briefly show the last frame. Open
+SDK sessions and watch iterators stay connected, participant IDs survive,
+and a control turn keeps its original expiry. The predecessor finishes
+dispatched input and hands over between gestures. If a gesture stays held
+or the standby rejects the checkpoint, the current generation resumes.
+An upgrade started from another shell keeps the running desktop's capture
+and input connections pointed at the same display and continues its audit journal.
+For the first rollout from a build without handoff support, let its sessions
+close and its 30-second idle timer expire before activating the new build.
+
 When several agents share a desktop, a short control turn can protect a
 multi-step interaction such as opening a menu and choosing an item. Use
 **Take turn** and **Release turn** in the viewer, or enable `turns: true`

@@ -191,10 +191,21 @@ impl RawState {
   }
 }
 
-#[derive(Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRoute {
   picker: Option<String>,
   lease: Option<String>,
+}
+
+/// A quiet input worker can be recreated from its source selection. Held keys,
+/// button edges and executable commands never enter the handoff checkpoint.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DriverCheckpoint {
+  route: RawRoute,
+  dimensions: Option<[u32; 2]>,
+  point: Option<[f32; 2]>,
 }
 
 pub struct DesktopDriver {
@@ -222,6 +233,25 @@ impl DesktopDriver {
 
   pub fn raw_held(&self) -> bool {
     !self.state.held.is_empty()
+  }
+
+  pub(crate) fn park(&mut self) -> io::Result<DriverCheckpoint> {
+    if self.raw_held() {
+      return Err(io::Error::new(io::ErrorKind::WouldBlock, "input is held"));
+    }
+    self.reset_raw()?;
+    self.automation = None;
+    Ok(DriverCheckpoint {
+      route: self.route.clone(),
+      dimensions: self.state.dimensions,
+      point: self.state.point,
+    })
+  }
+
+  pub(crate) fn restore(&mut self, saved: &DriverCheckpoint) {
+    self.route = saved.route.clone();
+    self.state.dimensions = saved.dimensions;
+    self.state.point = saved.point;
   }
 
   pub fn overlay(&self, request: &InputRequest) -> Option<LiveAction> {

@@ -45,7 +45,7 @@ pub(in crate::daemon) fn fence_file() -> io::Result<File> {
   private_file(&path()?.with_file_name("gestures.lock"))
 }
 
-fn private_file(path: &Path) -> io::Result<File> {
+pub(super) fn private_file(path: &Path) -> io::Result<File> {
   let flags = OFlags::NOFOLLOW | OFlags::NONBLOCK;
   let lock = OpenOptions::new()
     .read(true)
@@ -81,3 +81,12 @@ pub(in crate::daemon) fn check_client(stream: &Stream) -> io::Result<()> {
 }
 
 pub(super) use check_client as check_server;
+
+pub(super) fn directory() -> io::Result<PathBuf> {
+  Ok(
+    path()?
+      .parent()
+      .expect("desktop socket directory")
+      .to_owned(),
+  )
+}

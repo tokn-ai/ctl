@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(6);
 
+#[cfg(all(debug_assertions, feature = "test-fixtures"))]
+#[path = "live_room/handoff.rs"]
+mod handoff;
+
 struct Watcher {
   child: Child,
   events: mpsc::Receiver<LiveEvent>,
@@ -22,7 +26,16 @@ struct Watcher {
 
 impl Watcher {
   fn open(target: Target, window: &str, name: &str) -> Self {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ctream-agent"))
+    Self::open_with(
+      Command::new(env!("CARGO_BIN_EXE_ctream-agent")),
+      target,
+      window,
+      name,
+    )
+  }
+
+  fn open_with(mut command: Command, target: Target, window: &str, name: &str) -> Self {
+    let mut child = command
       .args([LIVE_VERSION, "live-room", &target.to_string(), name, window])
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())

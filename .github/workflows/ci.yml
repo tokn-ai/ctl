@@ -124,6 +124,9 @@ jobs:
       - name: Run workspace tests
         run: node scripts/ci/check.mts rust
 
+      - name: Test online ctream daemon handoff
+        run: cargo test --locked -p ctream-agent --features test-fixtures --test live_room handoff::online_upgrade
+
       - name: Install Bun for caller credential interoperability
         uses: oven-sh/setup-bun@v2
 

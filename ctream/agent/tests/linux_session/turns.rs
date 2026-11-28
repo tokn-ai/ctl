@@ -292,3 +292,216 @@ fn desktop_turns_fence_input_across_windows_and_correlate_audit_events()
   assert_eq!(text, "abc");
   Ok(())
 }
+
+#[test]
+#[ignore = "requires the disposable X11 session and sibling CLI in docker/ctream"]
+fn online_upgrade_preserves_native_view_and_sdk_session_through_two_generations()
+-> Result<(), Box<dyn Error>> {
+  use ctream_proto::live::LiveEvent;
+  use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConfigureWindowAux};
+
+  let fixture = HostFixture::new("swap")?;
+  let caller = fixture.caller("sdk")?;
+  let display = std::env::var("CTREAM_TEST_X11")?;
+  let target = Target::parse(&display)?;
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let (xid, window) = fixture_window(
+    &conn,
+    &conn.setup().roots[screen],
+    target,
+    30,
+    b"Online upgrade",
+  )?;
+  conn
+    .change_window_attributes(
+      xid,
+      &ChangeWindowAttributesAux::new()
+        .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
+    )?
+    .check()?;
+  let open = |op, label| {
+    NamedClient::open(
+      &caller,
+      fixture.state(),
+      &display,
+      &window,
+      op,
+      Some(("1.0.7", label)),
+    )
+  };
+  let mut sdk = open("session", "writer")?;
+  let screenshot = |sdk: &mut NamedClient| success(sdk, json!({"operation":"screenshot"}));
+  assert_eq!(screenshot(&mut sdk)?["width"], 220);
+  let mut watch = open("watch", "watcher")?;
+  let writer = writer_id(&watch.receive()?);
+  assert_eq!(watch.receive()?, free_event());
+
+  let client = fixture.client()?;
+  let session = client.session(
+    target,
+    Some(ctream_proto::Window {
+      id: window.clone(),
+      ..Default::default()
+    }),
+  );
+  let mut video = session.automation()?;
+  assert_eq!(video.screenshot()?.size, [220, 100]);
+  let (mut viewer, _connection) = session.viewer_observer("viewer")?.split();
+  let secret = viewer.viewer_attachment()?;
+  let mut input = session.viewer_control("viewer", None, Some(&secret))?;
+  let Some(LiveEvent::Snapshot {
+    self_id,
+    participants,
+  }) = viewer.next_event()?
+  else {
+    panic!("missing native roster")
+  };
+  assert_eq!(participants.len(), 3);
+  assert_eq!(watch.receive()?["participant"]["participant_id"], self_id);
+  assert!(matches!(
+    viewer.next_event()?,
+    Some(LiveEvent::Turn { holder: None, .. })
+  ));
+
+  let token = acquire(&mut sdk, 30_000)?;
+  let original_turn = watch.receive()?;
+  assert_eq!(original_turn["holder"]["participant_id"], writer);
+  assert_eq!(
+    serde_json::to_value(viewer.next_event()?.unwrap())?,
+    original_turn
+  );
+  let generation = || -> Result<Value, Box<dyn Error>> {
+    let out = fixture.command().args(["daemon", "status"]).output()?;
+    assert!(
+      out.status.success(),
+      "{}",
+      String::from_utf8_lossy(&out.stderr)
+    );
+    let status: Value = serde_json::from_slice(&out.stdout)?;
+    let generation = status
+      .get("generation")
+      .filter(|id| id.is_string())
+      .expect("online daemon generation");
+    Ok(generation.clone())
+  };
+  let mut previous = generation()?;
+  let operator_state = fixture.caller("operator")?;
+  let context = || -> Result<Value, Box<dyn Error>> {
+    let mut socket =
+      std::os::unix::net::UnixStream::connect(fixture.state().join("daemon/v2.sock"))?;
+    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    socket.write_all(b"{\"maintenance\":{\"operation\":\"launch_context\"}}\n")?;
+    let mut line = String::new();
+    BufReader::new(socket).read_line(&mut line)?;
+    Ok(serde_json::from_str(&line)?)
+  };
+  let desktop = context()?;
+  let mut ids = Vec::new();
+  for (current_width, width) in [(220, 225), (225, 230)] {
+    // Dispatch on the established session while the candidate is starting.
+    let upgrade = fixture
+      .command()
+      .args(["daemon", "upgrade", AGENT])
+      .env("XDG_STATE_HOME", &operator_state)
+      .env("XDG_RUNTIME_DIR", operator_state.join("other-runtime"))
+      .env("XAUTHORITY", operator_state.join("other-authority"))
+      .env("DISPLAY", ":9999")
+      .env_remove("DBUS_SESSION_BUS_ADDRESS")
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()?;
+    sdk.send(json!({"operation":"click","point":{"x":30,"y":20},"size":[current_width,100],"button":"left","turn_id":token}))?;
+    let receipt = sdk.receive()?;
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    let id = action_id(&receipt);
+    let event = watch.receive()?;
+    assert_eq!(event["action_id"], id);
+    assert_eq!(event["participant_id"], writer);
+    assert_eq!(viewer.next_event()?, Some(serde_json::from_value(event)?));
+    ids.push(id);
+    let upgraded = upgrade.wait_with_output()?;
+    assert!(
+      upgraded.status.success(),
+      "{}",
+      String::from_utf8_lossy(&upgraded.stderr)
+    );
+    let current = generation()?;
+    assert_ne!(current, previous);
+    assert_eq!(
+      context()?,
+      desktop,
+      "operator's shell changed the live desktop"
+    );
+    previous = current;
+
+    // Change the real source after takeover; the new dimensions prove these
+    // are fresh frames on the same capture streams, rather than cached images.
+    conn
+      .configure_window(xid, &ConfigureWindowAux::new().width(width))?
+      .check()?;
+    wait_for("resumed SDK and native capture see resized source", || {
+      let ready =
+        screenshot(&mut sdk)?["width"] == width && video.screenshot()?.size[0] == width as usize;
+      Ok(ready.then_some(()))
+    })?;
+
+    // A probe in a different room sees the desktop reservation without adding
+    // join/leave noise to the session whose output order we are checking.
+    let mut probe = NamedClient::open(
+      &caller,
+      fixture.state(),
+      &display,
+      "x11-1",
+      "watch",
+      Some(("1.0.7", "probe")),
+    )?;
+    assert_eq!(probe.receive()?["type"], "snapshot");
+    assert_eq!(
+      probe.receive()?,
+      original_turn,
+      "upgrade extended or replaced the turn"
+    );
+    probe.close()?;
+  }
+  success(
+    &mut sdk,
+    json!({"operation":"release_turn","turn_id":token}),
+  )?;
+  assert_eq!(watch.receive()?, free_event());
+  assert!(matches!(
+    viewer.next_event()?,
+    Some(LiveEvent::Turn { holder: None, .. })
+  ));
+  input.toggle_turn()?;
+  assert_eq!(watch.receive()?["holder"]["participant_id"], self_id);
+  input.toggle_turn()?;
+
+  conn.get_input_focus()?.reply()?;
+  let mut physical = Vec::new();
+  while let Some(event) = conn.poll_for_event()? {
+    match event {
+      Event::ButtonPress(ev) if ev.event == xid => physical.push((ev.detail, true)),
+      Event::ButtonRelease(ev) if ev.event == xid => physical.push((ev.detail, false)),
+      _ => {}
+    }
+  }
+  assert_eq!(physical, [(1, true), (1, false), (1, true), (1, false)]);
+  let rows = activity_details(fixture.state())?;
+  assert!(
+    fs::read_dir(operator_state)?.next().is_none(),
+    "upgrade redirected the desktop's audit database"
+  );
+  assert_eq!(
+    rows.len(),
+    2,
+    "each physical click must have exactly one audit row"
+  );
+  assert_eq!(rows[0]["turn_ref"], rows[1]["turn_ref"]);
+  assert!(rows[0]["turn_ref"].is_string());
+  for (row, id) in rows.iter().rev().zip(ids) {
+    assert_eq!(row["action_id"], id);
+    assert_eq!(row["session_id"], writer);
+    assert_eq!(row["status"], "succeeded");
+  }
+  Ok(())
+}

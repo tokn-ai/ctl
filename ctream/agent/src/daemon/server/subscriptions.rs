@@ -1,4 +1,4 @@
-use super::{Join, Membership, Mode, Participant, QUEUE_SIZE, Room, Rooms};
+use super::{Join, Membership, Mode, Participant, QUEUE_SIZE, Room, Rooms, checkpoint};
 use crate::daemon::{invalid, observer, write_json};
 use ctream_proto::live::LiveEvent;
 use std::{
@@ -10,7 +10,7 @@ use tokio::{
   sync::{Notify, mpsc},
 };
 
-type Tagged = (usize, Arc<LiveEvent>);
+pub(super) type Tagged = (usize, Arc<LiveEvent>);
 
 pub(super) enum Events {
   Single(mpsc::Sender<Arc<LiveEvent>>),
@@ -48,16 +48,21 @@ pub(super) struct Attached {
   _sources: Arc<Vec<Membership>>,
 }
 
-struct Owner {
+pub(super) struct Owner {
   rooms: Rooms,
   capability: String,
   _sources: Arc<Vec<Membership>>,
+  registration: Option<checkpoint::Registration>,
 }
 
 impl Owner {
+  #[cfg(test)]
   fn register(rooms: Rooms, subscriptions: Vec<Membership>) -> Self {
+    Self::open(rooms, subscriptions, uuid::Uuid::new_v4().to_string())
+  }
+
+  fn open(rooms: Rooms, subscriptions: Vec<Membership>, capability: String) -> Self {
     let sources = Arc::new(subscriptions);
-    let capability = uuid::Uuid::new_v4().to_string();
     rooms.state.lock().unwrap().observers.insert(
       capability.clone(),
       Binding {
@@ -69,6 +74,7 @@ impl Owner {
       rooms,
       capability,
       _sources: sources,
+      registration: None,
     }
   }
 }
@@ -85,7 +91,43 @@ impl Drop for Owner {
   }
 }
 
+#[cfg(test)]
 pub(super) fn attach(rooms: Rooms, capability: &str, source: &Room) -> io::Result<Membership> {
+  attach_lane(rooms, capability, source, None)
+}
+
+pub(super) fn attach_lane(
+  rooms: Rooms,
+  capability: &str,
+  source: &Room,
+  lane: Option<uuid::Uuid>,
+) -> io::Result<Membership> {
+  if let Some(ready) = checkpoint::claim(
+    &rooms,
+    lane,
+    |saved| matches!(saved, checkpoint::Lane::Attached { capability: old, source: room, .. } if old == capability && room == source),
+  )? {
+    let checkpoint::Prepared::Attached(member) = ready else {
+      unreachable!()
+    };
+    return Ok(member);
+  }
+  prepare_attachment(
+    rooms,
+    capability,
+    source,
+    uuid::Uuid::new_v4().to_string(),
+    lane,
+  )
+}
+
+pub(super) fn prepare_attachment(
+  rooms: Rooms,
+  capability: &str,
+  source: &Room,
+  key: String,
+  lane: Option<uuid::Uuid>,
+) -> io::Result<Membership> {
   let mut state = rooms.state.lock().unwrap();
   let binding = state
     .observers
@@ -104,45 +146,86 @@ pub(super) fn attach(rooms: Rooms, capability: &str, source: &Room) -> io::Resul
     .ok_or_else(|| invalid("unknown observed source"))?;
   let participant = observed.participant.clone();
   let room = observed.room.clone();
-  let key = uuid::Uuid::new_v4().to_string();
   let revoked = Arc::new(Notify::new());
   binding.revoked = Some(revoked.clone());
-  state.register_controller(key.clone(), room.clone());
+  state.register_controller(
+    key.clone(),
+    room.clone(),
+    participant.participant_id.clone(),
+  );
   drop(state);
-  Ok(Membership {
+  let mut member = Membership {
     rooms,
     room,
     id: participant.participant_id.clone(),
     participant,
     key: Some(key),
+    registration: None,
     attachment: Some(Attached {
       capability: capability.to_owned(),
       revoked,
       _sources: sources,
     }),
-  })
+  };
+  member.registration =
+    checkpoint::Registration::install(&member.rooms, lane, || checkpoint::Lane::Attached {
+      source: source.clone(),
+      capability: capability.to_owned(),
+      key: member.key.clone().expect("controller key"),
+    })?;
+  Ok(member)
 }
 
-pub(super) async fn serve(
+pub(super) type Observer = (Owner, mpsc::Receiver<Tagged>, Arc<Notify>);
+
+pub(super) fn subscribe(
   rooms: Rooms,
   sources: Vec<Room>,
   agent_id: String,
-  mut read: impl AsyncRead + Unpin,
-  mut write: impl AsyncWrite + Unpin,
-) -> io::Result<()> {
+  lane: Option<uuid::Uuid>,
+) -> io::Result<Observer> {
   observer::validate(&sources, &agent_id)?;
+  if let Some(ready) = checkpoint::claim(
+    &rooms,
+    lane,
+    |saved| matches!(saved, checkpoint::Lane::Observer { sources: old, participant, .. } if old == &sources && participant.agent_id == agent_id),
+  )? {
+    let checkpoint::Prepared::Observer(subscription) = ready else {
+      unreachable!()
+    };
+    return Ok(subscription);
+  }
   let participant = Participant {
     participant_id: uuid::Uuid::new_v4().to_string(),
     agent_id,
   };
-  let (output, mut events) = mpsc::channel(QUEUE_SIZE);
+  prepare_observer(
+    rooms,
+    sources,
+    participant,
+    uuid::Uuid::new_v4().to_string(),
+    lane,
+    false,
+  )
+}
+
+pub(super) fn prepare_observer(
+  rooms: Rooms,
+  sources: Vec<Room>,
+  participant: Participant,
+  capability: String,
+  lane: Option<uuid::Uuid>,
+  restoring: bool,
+) -> io::Result<Observer> {
+  observer::validate(&sources, &participant.agent_id)?;
+  let (output, events) = mpsc::channel(QUEUE_SIZE);
   let evicted = Arc::new(Notify::new());
-  let mut subscriptions = Vec::with_capacity(sources.len());
-  for (source, room) in sources.into_iter().enumerate() {
-    subscriptions.push(Membership::register(
+  let mut memberships = Vec::with_capacity(sources.len());
+  for (source, room) in sources.iter().enumerate() {
+    memberships.push(Membership::open(
       rooms.clone(),
       Join {
-        room,
+        room: room.clone(),
         participant: participant.clone(),
         subscribe: true,
         mode: Mode::Observed,
@@ -152,16 +235,68 @@ pub(super) async fn serve(
         output: output.clone(),
       },
       evicted.clone(),
+      None,
+      restoring,
     )?);
   }
-  drop(output);
-  let owner = Owner::register(rooms, subscriptions);
+  let mut owner = Owner::open(rooms.clone(), memberships, capability.clone());
+  owner.registration =
+    checkpoint::Registration::install(&rooms, lane, || checkpoint::Lane::Observer {
+      sources,
+      participant,
+      capability,
+    })?;
+  Ok((owner, events, evicted))
+}
+
+#[cfg(test)]
+async fn serve(
+  rooms: Rooms,
+  sources: Vec<Room>,
+  agent_id: String,
+  read: impl AsyncRead + Unpin,
+  write: impl AsyncWrite + Unpin,
+) -> io::Result<()> {
+  serve_lane(
+    rooms,
+    sources,
+    agent_id,
+    read,
+    write,
+    &super::lane::Gate::legacy(),
+  )
+  .await
+}
+
+pub(super) async fn serve_lane(
+  rooms: Rooms,
+  sources: Vec<Room>,
+  agent_id: String,
+  mut read: impl AsyncRead + Unpin,
+  mut write: impl AsyncWrite + Unpin,
+  gate: &super::lane::Gate,
+) -> io::Result<()> {
+  use super::lane::Phase;
+  let (owner, mut events, evicted) = subscribe(rooms, sources, agent_id, gate.id())?;
   let send = async {
-    write_json(&mut write, &owner.capability).await?;
-    while let Some((source, event)) = events.recv().await {
-      write_json(&mut write, &(source, event.as_ref())).await?;
+    if !gate.resumed() {
+      write_json(&mut write, &owner.capability).await?;
     }
-    Ok(())
+    loop {
+      tokio::select! {
+        biased;
+        _ = gate.next_output_barrier() => {
+          while let Ok((source, event)) = events.try_recv() {
+            write_json(&mut write, &(source, event.as_ref())).await?;
+          }
+          if gate.park(Phase::Freeze, Phase::Freeze, None).await { return Ok(()); }
+        }
+        next = events.recv() => {
+          let Some((source,event)) = next else { return Ok(()); };
+          write_json(&mut write, &(source, event.as_ref())).await?;
+        }
+      }
+    }
   };
   let mut byte = [0u8];
   // Readers can leave even while the single bounded output queue is backpressured.

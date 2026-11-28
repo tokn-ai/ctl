@@ -66,7 +66,32 @@ fn interactive_session() -> io::Result<u32> {
   Ok(session)
 }
 
+// Tests run distinct daemon processes concurrently under the same account and
+// logon. Keep the named pipe and every lock in the same fixture namespace.
+#[cfg(any(test, all(debug_assertions, feature = "test-fixtures")))]
+fn fixture() -> io::Result<Option<(PathBuf, uuid::Uuid)>> {
+  let Some(directory) = std::env::var_os("CTREAM_TEST_DAEMON_RUNTIME").map(PathBuf::from) else {
+    return Ok(None);
+  };
+  let id = directory
+    .file_name()
+    .and_then(|stem| stem.to_str())
+    .and_then(|stem| uuid::Uuid::try_parse(stem).ok())
+    .filter(|_| directory.is_absolute())
+    .ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "expected an isolated daemon fixture directory ending in a UUID",
+      )
+    })?;
+  Ok(Some((directory, id)))
+}
+
 pub(super) fn path() -> io::Result<PathBuf> {
+  #[cfg(any(test, all(debug_assertions, feature = "test-fixtures")))]
+  if let Some((_, id)) = fixture()? {
+    return Ok(PathBuf::from(format!(r"\\.\pipe\ctream-test-{id}")));
+  }
   Ok(PathBuf::from(format!(
     r"\\.\pipe\ctream-live-v2-{}-{}",
     host_account_id()?,
@@ -81,28 +106,54 @@ pub(super) fn restrict(options: ListenerOptions<'_>) -> io::Result<ListenerOptio
   Ok(options.security_descriptor(SecurityDescriptor::deserialize(&sddl)?))
 }
 
-pub(super) fn fence_file() -> io::Result<std::fs::File> {
+pub(super) fn directory() -> io::Result<PathBuf> {
+  #[cfg(any(test, all(debug_assertions, feature = "test-fixtures")))]
+  if let Some((directory, _)) = fixture()? {
+    return Ok(directory);
+  }
+  let base = dirs::data_local_dir().ok_or_else(|| io::Error::other("missing LocalAppData"))?;
+  let dir = base
+    .join("ctream")
+    .join(format!("desktop-{}", interactive_session()?));
+  std::fs::create_dir_all(&dir)?;
+  use std::os::windows::fs::MetadataExt as _;
+  for path in [dir.parent().unwrap(), dir.as_path()] {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_dir() || meta.file_attributes() & 0x400 != 0 {
+      return Err(io::Error::other("unsafe desktop state directory"));
+    }
+  }
+  Ok(dir)
+}
+
+pub(super) fn private_file(path: &std::path::Path) -> io::Result<std::fs::File> {
   use std::{
     fs,
     os::windows::fs::{MetadataExt, OpenOptionsExt},
   };
-  // LocalAppData inherits the user's profile ACL. Keep this stable across
-  // daemon protocol versions so recovery also fences an upgraded executable.
-  let base = dirs::data_local_dir().ok_or_else(|| io::Error::other("missing LocalAppData"))?;
-  fs::create_dir_all(&base)?;
-  let name = format!("ctream-live-{}.gestures", interactive_session()?);
   let file = fs::OpenOptions::new()
     .read(true)
     .write(true)
     .create(true)
     .truncate(false)
     .custom_flags(0x0020_0000)
-    .open(base.join(name))?;
+    .open(path)?;
   let info = file.metadata()?;
   if !info.is_file() || info.file_attributes() & 0x400 != 0 {
     return Err(io::Error::other("unsafe gesture fence"));
   }
   Ok(file)
+}
+
+pub(super) fn fence_file() -> io::Result<std::fs::File> {
+  #[cfg(any(test, all(debug_assertions, feature = "test-fixtures")))]
+  if let Some((directory, _)) = fixture()? {
+    return private_file(&directory.join("gestures.lock"));
+  }
+  // Keep the fence shared with hosts from before online upgrades.
+  let base = dirs::data_local_dir().ok_or_else(|| io::Error::other("missing LocalAppData"))?;
+  std::fs::create_dir_all(&base)?;
+  private_file(&base.join(format!("ctream-live-{}.gestures", interactive_session()?)))
 }
 
 pub(super) fn check_server(stream: &Stream) -> io::Result<()> {

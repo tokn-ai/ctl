@@ -49,6 +49,7 @@ unpublished wire formats.
 | `ctl_files` | 1 | `1.0.1` |
 | `ctream_agent` | 1 | `1.0.1` |
 | `ctream_sdk` | 1 | `1.0.1` |
+| `ctream_daemon` (host-local) | 1 | `1.0.1` |
 
 `ctream_sdk` starts at 1.0.1 (build 1) for local automation clients invoking
 the `ctream` executable. The SDK selects `do TARGET --protocol 1.0.1` and
@@ -933,6 +934,29 @@ initial redacted row before calling a driver. Lost acknowledgements leave it
 requester's receipt have the same public ID. Previous session, watch and
 capture versions retain their wire formats. Input arriving on those protocols
 is still subject to daemon arbitration and audit.
+
+Planned online daemon upgrades introduce the private host-local `ctream_daemon`
+handoff contract `1.0.1` (build 1). The previous per-connection daemon
+transport was unversioned. A relay offers lane format 1 before its first
+application request. It receives an explicit readiness response and sends
+complete request records. Each output frame carries the number of complete
+requests consumed during that physical connection. A terminal switch frame
+authorizes the relay to resume its private lane on the successor. Only a
+request beyond the predecessor's confirmed boundary can be sent there.
+Ordinary transport loss retains the existing uncertain-delivery semantics.
+
+The management handshake and checkpoint also use format 1. The host's
+`launch_context` operation supplies the running daemon's desktop connection
+settings to the launcher. A standby restores and validates a private
+checkpoint before the predecessor commits
+the change. Roster identities, attachments and unexpired turn deadlines
+survive the transfer. The standby inherits the running desktop's Linux
+session locators and the path to the existing host action journal. Native
+capture resumes on a complete frame. The first rollout accepts legacy
+connections and defers a requested handoff while they are open. New relays
+can use the previous transport on older hosts. The external `ctream_agent`
+contract remains `1.1.19` (build 19), `ctream_sdk` remains `1.0.7`
+(build 7), and the TypeScript package remains `0.1.4`.
 
 Every PR description must state its protocol changes, or **None** when there
 are no changes. Include the previous and new contracts and the compatibility

@@ -1,16 +1,13 @@
 //! Observe several capture sources on one authenticated desktop-daemon connection.
 use super::authority::{Command, Reply, exchange};
+use super::transport::{self, Stream};
 use super::{
-  CONTROL_LIMIT, EVENT_LIMIT, IO_TIMEOUT, Opening, Room, endpoint, invalid, read_json, write_json,
+  CONTROL_LIMIT, EVENT_LIMIT, IO_TIMEOUT, Opening, Room, invalid, read_json, write_json,
 };
 use ctream_client::sdk::Mutation;
 use ctream_proto::{Target, live::LiveEvent, valid_agent_id};
-use interprocess::local_socket::tokio::Stream;
 use std::{collections::BTreeSet, io, path::Path};
-use tokio::{
-  io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-  time::timeout,
-};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 const MAX_SOURCES: usize = 16;
 // The private record wraps the ordinary event with a small source index.
@@ -62,7 +59,7 @@ impl SourceObserver {
       .map(|(target, window)| Room::new(*target, window.as_deref()))
       .collect();
     validate(&rooms, agent_id)?;
-    let mut stream = BufReader::new(endpoint::connect_via(Some(agent)).await?);
+    let mut stream = BufReader::new(transport::connect(Some(agent), false).await?);
     write_json(
       stream.get_mut(),
       &Opening::ObserveSources {
@@ -71,7 +68,10 @@ impl SourceObserver {
       },
     )
     .await?;
-    let attachment = timeout(IO_TIMEOUT, read_json::<String>(&mut stream, CONTROL_LIMIT))
+    let attachment = stream
+      .get_ref()
+      .reply_deadline(IO_TIMEOUT)
+      .wait(read_json::<String>(&mut stream, CONTROL_LIMIT))
       .await??
       .filter(|value| uuid::Uuid::try_parse(value).is_ok())
       .ok_or_else(|| invalid("desktop daemon rejected observed sources"))?;
@@ -103,7 +103,7 @@ impl SourceObserver {
     {
       return Err(invalid("control requires a subscribed source"));
     }
-    let mut stream = BufReader::new(endpoint::connect_existing().await?);
+    let mut stream = BufReader::new(transport::connect(None, true).await?);
     write_json(
       stream.get_mut(),
       &Opening::AttachControl {
@@ -112,7 +112,10 @@ impl SourceObserver {
       },
     )
     .await?;
-    timeout(IO_TIMEOUT, read_json::<Reply>(&mut stream, CONTROL_LIMIT))
+    stream
+      .get_ref()
+      .reply_deadline(IO_TIMEOUT)
+      .wait(read_json::<Reply>(&mut stream, CONTROL_LIMIT))
       .await??
       .ok_or_else(|| invalid("desktop daemon disconnected during attachment"))?
       .result()?;
@@ -172,7 +175,7 @@ impl SourceControl {
         reply.result()
       }
       Err(error) => {
-        endpoint::discard_pending(stream.get_ref());
+        stream.get_ref().discard_pending();
         Err(if matches!(command, Command::Execute { .. }) {
           ctream_driver::UnconfirmedDelivery::error(error)
         } else {

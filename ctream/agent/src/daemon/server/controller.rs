@@ -1,6 +1,9 @@
 //! One controller connection. The daemon makes the admission decision, journals
 //! it, runs the selected platform worker, and publishes the confirmed result.
-use super::{Command, Membership, Reply};
+use super::{
+  Command, Membership, Reply,
+  lane::{Gate, LaneState, Phase},
+};
 use crate::{
   activity::{Journal, Outcome},
   daemon::{invalid, read_json, write_json},
@@ -41,21 +44,40 @@ struct Controller {
 }
 
 impl Controller {
-  fn new(member: Membership) -> io::Result<Self> {
+  fn new(member: Membership, saved: Option<&LaneState>) -> io::Result<Self> {
     let target = Target::parse(&member.room.target).map_err(io::Error::other)?;
-    let driver = DesktopDriver::new(
+    let mut driver = DesktopDriver::new(
       target,
       member.room.window.clone(),
       member.key.clone().expect("registered controller"),
     );
+    if let Some(checkpoint) = saved.and_then(|s| s.driver.as_ref()) {
+      driver.restore(checkpoint);
+    }
+    let turn = Self::turn(&member);
     Ok(Self {
       journal: member.rooms.journal.for_session(&member.id)?,
       member,
       driver,
       target,
-      turn: None,
+      turn,
       held_until: None,
-      expired_hold: false,
+      expired_hold: saved.is_some_and(|s| s.expired_hold),
+    })
+  }
+
+  fn turn(member: &Membership) -> Option<Turn> {
+    member.turn_lease().map(|(token, reference, expires)| Turn {
+      token,
+      reference,
+      expires,
+    })
+  }
+
+  fn park(&mut self) -> io::Result<LaneState> {
+    Ok(LaneState {
+      driver: Some(self.driver.park()?),
+      expired_hold: self.expired_hold,
     })
   }
 
@@ -88,14 +110,9 @@ impl Controller {
     self.expire()?;
     match command {
       Command::Acquire { ttl_ms } => {
-        let start = Instant::now();
         let reply = self.member.command(Command::Acquire { ttl_ms });
-        if let Reply::Ok { value: Some(token) } = &reply {
-          self.turn = Some(Turn {
-            token: token.clone(),
-            reference: uuid::Uuid::new_v4().to_string(),
-            expires: start + Duration::from_millis(ttl_ms),
-          });
+        if matches!(&reply, Reply::Ok { value: Some(_) }) {
+          self.turn = Self::turn(&self.member);
           self.expired_hold = false;
         }
         Ok(reply)
@@ -206,6 +223,7 @@ pub(super) async fn serve(
   member: Membership,
   reader: &mut (impl AsyncBufRead + Unpin),
   writer: &mut (impl AsyncWrite + Unpin),
+  gate: &Gate,
 ) -> io::Result<()> {
   let rooms = member.rooms.clone();
   let key = member.key.clone().expect("registered controller");
@@ -225,16 +243,21 @@ pub(super) async fn serve(
     }
   };
   tokio::pin!(revoked);
-  let controller = Arc::new(Mutex::new(Controller::new(member)?));
+  let controller = Arc::new(Mutex::new(Controller::new(member, gate.saved())?));
   let mut close_requested = false;
   let result = async {
-    write_json(writer, &ready).await?;
+    if !gate.resumed() {
+      write_json(writer, &ready).await?;
+    }
     'commands: loop {
       let command = {
         let packet = read_json::<Command>(reader, COMMAND_LIMIT);
         tokio::pin!(packet);
         loop {
-          let deadline = controller.lock().unwrap().deadline();
+          let (deadline, can_park) = {
+            let state = controller.lock().unwrap();
+            (state.deadline(), !state.driver.raw_held())
+          };
           let expiry = async {
             match deadline {
               Some(at) => tokio::time::sleep_until(at).await,
@@ -244,6 +267,15 @@ pub(super) async fn serve(
           tokio::select! {
             biased;
             _ = &mut revoked => break 'commands,
+            _ = gate.requested(Phase::DrainInput), if can_park => {
+              // Parking releases idle delegated workers. Input held across
+              // requests gets its ordinary release/expiry path before this.
+              let state = controller.clone();
+              let saved = blocking(move || state.lock().unwrap().park()).await?;
+              if gate.park(Phase::DrainInput, Phase::Freeze, Some(saved)).await {
+                break 'commands;
+              }
+            }
             _ = expiry => {
               let state = controller.clone();
               blocking(move || state.lock().unwrap().expire()).await?;

@@ -26,6 +26,7 @@ pub(super) struct Endpoint {
   pub(super) listener: Listener,
   #[cfg(unix)]
   _lock: std::fs::File,
+  _authority: std::fs::File,
 }
 
 pub(super) use platform::check_client;
@@ -42,6 +43,8 @@ pub(super) fn discard_pending(_stream: &Stream) {
 
 pub(super) fn bind() -> io::Result<Endpoint> {
   let path = platform::path()?;
+  let authority = lock("authority.lock")?;
+  authority.try_lock()?;
   #[cfg(unix)]
   let lock = platform::acquire(&path)?;
   let options = ListenerOptions::new().name(path.to_fs_name::<GenericFilePath>()?);
@@ -51,6 +54,7 @@ pub(super) fn bind() -> io::Result<Endpoint> {
     listener: options.create_tokio()?,
     #[cfg(unix)]
     _lock: lock,
+    _authority: authority,
   })
 }
 
@@ -64,22 +68,18 @@ async fn try_connect(path: &Path) -> io::Result<Stream> {
   Ok(stream)
 }
 
-fn spawn_daemon(executable: Option<&Path>) -> io::Result<()> {
-  let mut command = Command::new(match executable {
-    Some(path) => path.to_owned(),
-    None => std::env::current_exe()?,
-  });
-  command
-    .arg("daemon")
-    .env_remove("CTREAM_INPUT_DELEGATION")
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null());
+pub(super) fn directory() -> io::Result<PathBuf> {
+  platform::directory()
+}
+
+pub(super) fn lock(name: &str) -> io::Result<std::fs::File> {
+  platform::private_file(&directory()?.join(name))
+}
+
+pub(super) fn detached(command: &mut Command) -> io::Result<std::process::Child> {
   #[cfg(windows)]
-  let mut child = {
+  {
     use std::os::windows::process::CommandExt as _;
-    // The detached daemon belongs to the interactive account, independently of
-    // a particular SDK client. Some external job policies prohibit breakaway.
     const DETACHED_PROCESS: u32 = 0x00000008;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
     match command
@@ -87,13 +87,37 @@ fn spawn_daemon(executable: Option<&Path>) -> io::Result<()> {
       .spawn()
     {
       Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-        command.creation_flags(DETACHED_PROCESS).spawn()?
+        command.creation_flags(DETACHED_PROCESS).spawn()
       }
-      other => other?,
+      other => other,
     }
-  };
+  }
   #[cfg(not(windows))]
-  let mut child = command.spawn()?;
+  command.spawn()
+}
+
+fn spawn_daemon(executable: Option<&Path>) -> io::Result<()> {
+  let (path, context) = match super::generation::selected_launch()? {
+    Some(selected) => selected,
+    None => (
+      match executable {
+        Some(path) => path.to_owned(),
+        None => std::env::current_exe()?,
+      },
+      None,
+    ),
+  };
+  let mut command = Command::new(path);
+  if let Some(context) = context {
+    context.apply(&mut command)?;
+  }
+  command
+    .arg("daemon")
+    .env_remove("CTREAM_INPUT_DELEGATION")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+  let mut child = detached(&mut command)?;
   thread::Builder::new()
     .name("ctream-daemon-exit".into())
     .spawn(move || {
@@ -102,7 +126,7 @@ fn spawn_daemon(executable: Option<&Path>) -> io::Result<()> {
   Ok(())
 }
 
-fn offline(error: &io::Error) -> bool {
+pub(super) fn offline(error: &io::Error) -> bool {
   matches!(
     error.kind(),
     io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset

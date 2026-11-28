@@ -319,3 +319,50 @@ fn raw_viewer_lanes_share_identity_without_merging_matching_labels() -> Result<(
   rhs.finish_bounded()?;
   Ok(())
 }
+
+#[test]
+#[ignore = "requires the disposable X11 session in docker/ctream"]
+fn native_drag_releases_on_the_predecessor_before_online_handoff() -> Result<(), Box<dyn Error>> {
+  let display = std::env::var("CTREAM_TEST_X11")?;
+  let host = HostFixture::new("drag")?;
+  let mut holder = Viewer::open(&host, &display, "drag-owner", None)?;
+  holder.ok("take-turn 30000\n")?;
+  holder.ok("batch turn 2\nmove 7 9\nbutton 1 1\n")?;
+  let (conn, screen) = x11rb::connect(Some(&display))?;
+  let root = conn.setup().roots[screen].root;
+  let pressed = || -> Result<bool, Box<dyn Error>> {
+    Ok(
+      conn
+        .query_pointer(root)?
+        .reply()?
+        .mask
+        .contains(KeyButMask::BUTTON1),
+    )
+  };
+  assert!(pressed()?);
+  let upgrade = host
+    .command()
+    .args(["daemon", "upgrade"])
+    .stderr(Stdio::piped())
+    .spawn()?;
+  super::wait_for("old generation drains active drag", || {
+    let output = host.command().args(["daemon", "status"]).output()?;
+    assert!(output.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok((status["state"] == "draining").then_some(()))
+  })?;
+  assert!(pressed()?, "draining must let the owner finish its drag");
+  holder.ok("batch turn 1\nbutton 1 0\n")?;
+  let out = upgrade.wait_with_output()?;
+  assert!(
+    out.status.success(),
+    "{}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  assert!(!pressed()?);
+  holder.ok("batch turn 1\nmove 17 19\n")?;
+  holder.ok("release-turn\n")?;
+  assert_eq!(activity_details(host.state())?.len(), 3);
+  holder.close()?;
+  Ok(())
+}

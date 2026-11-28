@@ -1,10 +1,11 @@
 //! Durable, redacted host decisions and outcomes for desktop input requests.
 
+use crate::private_fs::{check, private_options};
 use ctream_proto::{Target, live::TurnError, valid_agent_id, valid_window_id};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde::Serialize;
 use std::{
-  fs::{self, DirBuilder, OpenOptions},
+  fs,
   io::{self, Write},
   path::{Path, PathBuf},
   sync::{Arc, Mutex},
@@ -57,12 +58,15 @@ pub(crate) struct Store {
 }
 
 impl Store {
-  #[cfg(test)]
   pub(crate) fn at(base: PathBuf) -> Arc<Self> {
     Arc::new(Self {
       base: Some(base),
       ..Default::default()
     })
+  }
+
+  pub(crate) fn base(&self) -> io::Result<PathBuf> {
+    self.base.clone().map_or_else(state_directory, Ok)
   }
 
   pub(crate) fn for_session(self: &Arc<Self>, participant_id: &str) -> io::Result<Journal> {
@@ -85,11 +89,7 @@ impl Store {
       .lock()
       .map_err(|_| io::Error::other("activity writer unavailable"))?;
     if slot.is_none() {
-      let base = match &self.base {
-        Some(base) => base.clone(),
-        None => state_directory()?,
-      };
-      let dir = prepare(&base, true)?;
+      let dir = prepare(&self.base()?, true)?;
       let mut db = open_db(&dir, true)?;
       initialize_writer(&mut db)?;
       *slot = Some(Writer {
@@ -335,78 +335,8 @@ fn state_directory() -> io::Result<PathBuf> {
     .ok_or_else(|| io::Error::other("host user state directory is unavailable"))
 }
 
-fn check(metadata: &fs::Metadata, directory: bool, private: bool) -> io::Result<()> {
-  let regular = if directory {
-    metadata.is_dir()
-  } else {
-    metadata.is_file()
-  };
-  #[cfg(unix)]
-  let permitted = {
-    use std::os::unix::fs::MetadataExt;
-    let forbidden = if private { 0o077 } else { 0o022 };
-    metadata.uid() == rustix::process::getuid().as_raw()
-      && metadata.mode() & forbidden == 0
-      && (directory || metadata.nlink() == 1)
-  };
-  #[cfg(windows)]
-  let permitted = {
-    use std::os::windows::fs::MetadataExt;
-    // LocalAppData supplies the user's inherited ACLs. Reject junctions and
-    // other reparse points before following a path within that namespace.
-    let _ = private;
-    metadata.file_attributes() & 0x400 == 0
-  };
-  if regular && permitted {
-    Ok(())
-  } else {
-    Err(io::Error::new(
-      io::ErrorKind::PermissionDenied,
-      "unsafe host activity storage",
-    ))
-  }
-}
-
 fn prepare(base: &Path, create: bool) -> io::Result<PathBuf> {
-  let mut builder = DirBuilder::new();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::DirBuilderExt;
-    builder.mode(0o700);
-  }
-  // The configured OS state root may not exist on the user's first run.
-  if create {
-    builder.recursive(true).create(base)?;
-  }
-  check(&fs::symlink_metadata(base)?, true, false)?;
-  let mut dir = base.to_owned();
-  for (component, private) in [("ctream", false), ("activity", true)] {
-    dir.push(component);
-    if create {
-      match builder.recursive(false).create(&dir) {
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        result => result?,
-      }
-    }
-    check(&fs::symlink_metadata(&dir)?, true, private)?;
-  }
-  dir.canonicalize()
-}
-
-fn private_options() -> OpenOptions {
-  let mut options = OpenOptions::new();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-    options.mode(0o600).custom_flags(flags.bits() as i32);
-  }
-  #[cfg(windows)]
-  {
-    use std::os::windows::fs::OpenOptionsExt;
-    options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
-  }
-  options
+  crate::private_fs::prepare(base, &[("ctream", false), ("activity", true)], create)
 }
 
 fn open_db(dir: &Path, write: bool) -> io::Result<Connection> {

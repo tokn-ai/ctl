@@ -11,17 +11,21 @@ use std::{
   sync::{Arc, Mutex},
   time::Duration,
 };
+use tokio::{io::AsyncWrite, sync::Notify, task::JoinSet};
+
+#[cfg(test)]
 use tokio::{
-  io::{AsyncRead, AsyncWrite, BufReader},
-  sync::{Notify, mpsc},
-  task::JoinSet,
+  io::{AsyncRead, BufReader},
   time::timeout,
 };
 
 const MAX_CONNECTIONS: usize = 256;
 const QUEUE_SIZE: usize = 64;
 const IDLE_EXIT: Duration = Duration::from_secs(30);
+pub(super) mod checkpoint;
 mod controller;
+pub(in crate::daemon) mod handoff;
+pub(super) mod lane;
 mod subscriptions;
 use subscriptions::Events;
 mod turns;
@@ -37,6 +41,7 @@ type Members = BTreeMap<String, Member>;
 
 struct ControllerRoute {
   source: Room,
+  participant: String,
   accepting: bool,
 }
 
@@ -46,14 +51,17 @@ struct State {
   turns: BTreeMap<turns::Domain, turns::Turns>,
   controllers: BTreeMap<String, ControllerRoute>,
   observers: BTreeMap<String, subscriptions::Binding>,
+  lanes: BTreeMap<uuid::Uuid, checkpoint::Lane>,
+  expiry_paused: bool,
   timer: Arc<tokio::sync::Notify>,
 }
 impl State {
-  fn register_controller(&mut self, key: String, source: Room) {
+  fn register_controller(&mut self, key: String, source: Room, participant: String) {
     self.controllers.insert(
       key,
       ControllerRoute {
         source,
+        participant,
         accepting: true,
       },
     );
@@ -61,12 +69,13 @@ impl State {
 }
 
 #[derive(Default)]
-struct Desktop {
+pub(super) struct Desktop {
   journal: Arc<crate::activity::Store>,
   state: Mutex<State>,
   available: std::sync::Condvar,
+  dormant: Mutex<BTreeMap<uuid::Uuid, checkpoint::Prepared>>,
 }
-type Rooms = Arc<Desktop>;
+pub(super) type Rooms = Arc<Desktop>;
 
 fn broadcast(members: &mut Members, event: LiveEvent) {
   let event = Arc::new(event);
@@ -119,21 +128,33 @@ struct Membership {
   participant: Participant,
   key: Option<String>,
   attachment: Option<subscriptions::Attached>,
+  registration: Option<checkpoint::Registration>,
 }
 
 impl Membership {
+  #[cfg(test)]
   fn register(
     rooms: Rooms,
     request: Join,
     events: impl Into<Events>,
     evict: Arc<Notify>,
   ) -> io::Result<Self> {
+    let key = (request.mode == Mode::Authority).then(|| uuid::Uuid::new_v4().to_string());
+    Self::open(rooms, request, events.into(), evict, key, false)
+  }
+
+  fn open(
+    rooms: Rooms,
+    request: Join,
+    events: Events,
+    evict: Arc<Notify>,
+    key: Option<String>,
+    restoring: bool,
+  ) -> io::Result<Self> {
     request.validate()?;
-    let events = events.into();
     let room = request.room;
     let id = request.participant.participant_id.clone();
     let mut state = rooms.state.lock().unwrap();
-    let key = (request.mode == Mode::Authority).then(|| uuid::Uuid::new_v4().to_string());
     state.expire(tokio::time::Instant::now());
     let turn_event =
       matches!(request.mode, Mode::Turns | Mode::Observed).then(|| state.turn_event(&room));
@@ -141,7 +162,7 @@ impl Membership {
     if members.contains_key(&id) {
       return Err(invalid("live session is already registered"));
     }
-    if request.subscribe {
+    if request.subscribe && !restoring {
       let participants = members
         .values()
         .map(|m| m.participant.clone())
@@ -159,12 +180,14 @@ impl Membership {
           .map_err(|_| invalid("could not deliver initial turn"))?;
       }
     }
-    broadcast(
-      members,
-      LiveEvent::Joined {
-        participant: request.participant.clone(),
-      },
-    );
+    if !restoring {
+      broadcast(
+        members,
+        LiveEvent::Joined {
+          participant: request.participant.clone(),
+        },
+      );
+    }
     members.insert(
       id.clone(),
       Member {
@@ -175,7 +198,7 @@ impl Membership {
       },
     );
     if let Some(key) = &key {
-      state.register_controller(key.clone(), room.clone());
+      state.register_controller(key.clone(), room.clone(), id.clone());
     }
     drop(state);
     Ok(Self {
@@ -185,6 +208,7 @@ impl Membership {
       participant: request.participant,
       key,
       attachment: None,
+      registration: None,
     })
   }
 
@@ -238,6 +262,7 @@ impl Drop for Membership {
   }
 }
 
+#[cfg(test)]
 async fn connection(stream: impl AsyncRead + AsyncWrite + Unpin, rooms: Rooms) -> io::Result<()> {
   let (read, mut write) = tokio::io::split(stream);
   let mut reader = BufReader::new(read);
@@ -246,20 +271,42 @@ async fn connection(stream: impl AsyncRead + AsyncWrite + Unpin, rooms: Rooms) -
   else {
     return Ok(());
   };
+  serve_opened(
+    opening,
+    rooms,
+    &mut reader,
+    &mut write,
+    &lane::Gate::legacy(),
+  )
+  .await
+}
+
+pub(super) async fn serve_opened(
+  opening: Opening,
+  rooms: Rooms,
+  reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+  write: &mut (impl AsyncWrite + Unpin),
+  gate: &lane::Gate,
+) -> io::Result<()> {
+  use lane::Phase;
   let request = match opening {
+    Opening::Lane { .. } | Opening::Maintenance { .. } => {
+      return Err(invalid("a lane requires an application operation"));
+    }
     #[cfg(any(target_os = "linux", windows))]
-    Opening::Capture { source } => return super::capture::serve(source, reader, write).await,
+    Opening::Capture { source } => return super::capture::serve(source, reader, write, gate).await,
     Opening::ObserveSources {
       observe_sources,
       agent_id,
     } => {
-      return subscriptions::serve(rooms, observe_sources, agent_id, reader, write).await;
+      return subscriptions::serve_lane(rooms, observe_sources, agent_id, reader, write, gate)
+        .await;
     }
     Opening::AttachControl { attachment, source } => {
-      let attached = subscriptions::attach(rooms, &attachment, &source);
+      let attached = subscriptions::attach_lane(rooms, &attachment, &source, gate.id());
       return match attached {
-        Ok(member) => controller::serve(member, &mut reader, &mut write).await,
-        Err(error) => write_json(&mut write, &Reply::invalid(&error.to_string())).await,
+        Ok(member) => controller::serve(member, reader, write, gate).await,
+        Err(error) => write_json(write, &Reply::invalid(&error.to_string())).await,
       };
     }
     Opening::Join(join) => join,
@@ -268,48 +315,106 @@ async fn connection(stream: impl AsyncRead + AsyncWrite + Unpin, rooms: Rooms) -
       delegation_key,
     } => {
       let mut pin = turns::Pin::attach(rooms, room, delegation_key)?;
-      write_json(&mut write, &Reply::done()).await?;
-      while let Some(command) = read_json::<Command>(&mut reader, CONTROL_LIMIT).await? {
+      let mut active = false;
+      if !gate.resumed() {
+        write_json(write, &Reply::done()).await?;
+      }
+      loop {
+        // Controllers may still be dispatching through a delegated driver
+        // during DrainInput. A pin must remain responsive until they drain.
+        let command = tokio::select! {
+          biased;
+          _ = gate.next_output_barrier(), if !active => {
+            if gate.park(Phase::Freeze, Phase::Freeze, None).await { return Ok(()); }
+            continue;
+          }
+          command = read_json::<Command>(reader, CONTROL_LIMIT) => command?,
+        };
+        let Some(command) = command else {
+          return Ok(());
+        };
         let result = match command {
-          Command::Begin { turn_id: None } => pin.begin(),
-          Command::Finish {} => pin.finish(),
+          Command::Begin { turn_id: None } => {
+            let result = pin.begin();
+            if matches!(result, Reply::Ok { .. }) {
+              active = true;
+            }
+            result
+          }
+          Command::Finish {} => {
+            let result = pin.finish();
+            if matches!(result, Reply::Ok { .. }) {
+              active = false;
+            }
+            result
+          }
           _ => Reply::invalid("invalid delegated driver command"),
         };
-        write_json(&mut write, &result).await?;
+        write_json(write, &result).await?;
       }
-      return Ok(());
     }
   };
   let subscribe = request.subscribe;
   let confirmed_only = request.mode == Mode::Observed;
-  let (sender, mut events) = mpsc::channel(QUEUE_SIZE);
-  let evicted = Arc::new(Notify::new());
-  let participant = Membership::register(rooms, request, sender, evicted.clone())?;
+  let (participant, mut events, evicted) = checkpoint::join(rooms, request, gate.id())?;
   if participant.key.is_some() {
-    return controller::serve(participant, &mut reader, &mut write).await;
+    return controller::serve(participant, reader, write, gate).await;
   }
-  write_json(&mut write, &true).await?;
+  if !gate.resumed() {
+    write_json(write, &true).await?;
+  }
   if !subscribe {
-    while let Some(action) = read_json::<LiveAction>(&mut reader, EVENT_LIMIT).await? {
+    loop {
+      let action = tokio::select! {
+        biased;
+        _ = gate.requested(Phase::DrainInput) => {
+          if gate.park(Phase::DrainInput, Phase::Freeze, None).await { return Ok(()); }
+          continue;
+        }
+        action = read_json::<LiveAction>(reader, EVENT_LIMIT) => action?,
+      };
+      let Some(action) = action else {
+        return Ok(());
+      };
       participant.publish(action)?;
-      write_json(&mut write, &true).await?;
+      write_json(write, &true).await?;
     }
-    return Ok(());
   }
   let read_actions = async {
-    while let Some(action) = read_json::<LiveAction>(&mut reader, EVENT_LIMIT).await? {
+    loop {
+      let action = tokio::select! {
+        biased;
+        _ = gate.requested(Phase::DrainInput) => {
+          if gate.park(Phase::DrainInput, Phase::DrainInput, None).await { return Ok(()); }
+          continue;
+        }
+        action = read_json::<LiveAction>(reader, EVENT_LIMIT) => action?,
+      };
+      let Some(action) = action else {
+        return Ok(());
+      };
       if confirmed_only {
         return Err(invalid("daemon observation is read-only"));
       }
       participant.publish(action)?;
     }
-    Ok(())
   };
   let send_events = async {
-    while let Some(event) = events.recv().await {
-      write_json(&mut write, &*event).await?;
+    loop {
+      tokio::select! {
+        biased;
+        _ = gate.requested(Phase::Freeze) => {
+          while let Ok(event) = events.try_recv() {
+            write_json(write, event.as_ref()).await?;
+          }
+          if gate.park(Phase::Freeze, Phase::Freeze, None).await {return Ok(());}
+        }
+        next = events.recv() => {
+          let Some(event) = next else {return Ok(());};
+          write_json(write, &*event).await?;
+        }
+      }
     }
-    Ok(())
   };
   tokio::select! {
     result = read_actions => result,
@@ -319,37 +424,63 @@ async fn connection(stream: impl AsyncRead + AsyncWrite + Unpin, rooms: Rooms) -
 }
 
 pub(super) async fn serve() -> io::Result<()> {
+  let start = endpoint::lock("upgrade.lock")?;
+  start.try_lock_shared()?;
   let endpoint = endpoint::bind()?;
   endpoint::wait_for_old_gestures()?;
-  let rooms = Rooms::default();
+  let state = super::generation::recover()?.unwrap_or_default();
+  let _ = super::generation::discard_unused_images();
+  drop(start);
+  serve_generation(endpoint, state).await
+}
+
+pub(in crate::daemon) async fn serve_generation(
+  endpoint: endpoint::Endpoint,
+  generation: handoff::Generation,
+) -> io::Result<()> {
+  let generation = Arc::new(generation);
+  generation.start_expiry();
   tokio::select! {
-    result=accept(endpoint,rooms.clone())=>result,
-    _=turns::expire_leases(rooms)=>unreachable!("expiry scheduler only stops at shutdown")
+    result=accept(endpoint,generation.clone())=>result,
+    _=turns::expire_leases(generation.rooms.clone())=>unreachable!("expiry scheduler only stops at shutdown")
   }
 }
 
-async fn accept(endpoint: endpoint::Endpoint, rooms: Rooms) -> io::Result<()> {
+async fn accept(
+  endpoint: endpoint::Endpoint,
+  generation: Arc<handoff::Generation>,
+) -> io::Result<()> {
   let mut clients = JoinSet::new();
   loop {
     let accepted = if clients.is_empty() {
-      match timeout(IDLE_EXIT, endpoint.listener.accept()).await {
+      match tokio::time::timeout_at(generation.idle_deadline(), endpoint.listener.accept()).await {
         Ok(result) => result,
         Err(_) => return Ok(()),
       }
     } else {
       tokio::select! {
-        result = endpoint.listener.accept() => result,
+        biased;
+        () = generation.commit_signal() => {
+          // Keep the election lock until every accepted session has received
+          // its last reply and SWITCH record on the predecessor's socket.
+          drop(endpoint.listener);
+          while clients.join_next().await.is_some() {}
+          return Ok(());
+        }
         _ = clients.join_next() => continue,
+        result = endpoint.listener.accept() => result,
       }
     };
     let stream = match accepted {
       Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
       other => other?,
     };
-    if clients.len() < MAX_CONNECTIONS && endpoint::check_client(&stream).is_ok() {
-      let rooms = rooms.clone();
+    // A full desktop must still admit the updater and a passive status query.
+    // The route enforces the application limit after reading its opening.
+    if clients.len() < MAX_CONNECTIONS + 2 && endpoint::check_client(&stream).is_ok() {
+      let generation = generation.clone();
       clients.spawn(async move {
-        let result = connection(&stream, rooms).await;
+        let result = handoff::route(&stream, &generation).await;
         endpoint::discard_pending(&stream);
         result
       });

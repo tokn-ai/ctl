@@ -1,4 +1,5 @@
 //! Host-only capabilities for a controller and its delegated native driver.
+use super::transport::{self, Stream};
 use super::{
   CONTROL_LIMIT, IO_TIMEOUT, Join, Mode, Opening, Room, endpoint, invalid, read_json, runtime,
   write_json,
@@ -7,10 +8,9 @@ use ctream_proto::{
   Target,
   live::{ActionFailure, TurnError},
 };
-use interprocess::local_socket::tokio::Stream;
 use serde::{Deserialize, Serialize};
 use std::{fs::File, io, path::Path, time::Duration};
-use tokio::{io::BufReader, runtime::Runtime, time::timeout};
+use tokio::{io::BufReader, runtime::Runtime};
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -161,14 +161,16 @@ impl Connection {
     let runtime = runtime()?;
     let (stream, value) = runtime.block_on(async {
       let stream = match opening {
-        Opening::Delegate { .. } | Opening::AttachControl { .. } => {
-          endpoint::connect_existing().await?
-        }
-        _ => endpoint::connect_via(executable).await?,
+        Opening::Delegate { .. } => Stream::Legacy(endpoint::connect_existing().await?),
+        Opening::AttachControl { .. } => transport::connect(None, true).await?,
+        _ => transport::connect(executable, false).await?,
       };
       let mut stream = BufReader::new(stream);
       write_json(stream.get_mut(), &opening).await?;
-      let reply: Reply = timeout(IO_TIMEOUT, read_json(&mut stream, CONTROL_LIMIT))
+      let reply: Reply = stream
+        .get_ref()
+        .reply_deadline(IO_TIMEOUT)
+        .wait(read_json(&mut stream, CONTROL_LIMIT))
         .await??
         .ok_or_else(|| {
           io::Error::new(io::ErrorKind::UnexpectedEof, "turn authority unavailable")
@@ -210,7 +212,7 @@ impl Connection {
       Err(err) => {
         // Keep the registered socket alive while physical execution drains,
         // even if a response timed out. A desynchronized stream is never reused.
-        endpoint::discard_pending(stream.get_ref());
+        stream.get_ref().discard_pending();
         self.failed = true;
         if self.fence.is_some() {
           self.stream = Some(stream);
@@ -249,12 +251,10 @@ impl Connection {
 
   #[cfg(target_os = "linux")]
   fn helper_handles(&mut self) -> io::Result<super::HelperHandles> {
-    use std::os::fd::AsFd;
     let stream = self
       .stream
       .as_ref()
       .ok_or_else(|| invalid("controller disconnected"))?;
-    let Stream::UdSocket(socket) = stream.get_ref();
     if self.helper_fence.is_none() {
       if self.fence.is_some() {
         return Err(invalid("register helper before admitting input"));
@@ -262,7 +262,7 @@ impl Connection {
       self.helper_fence = Some(endpoint::fence_file()?);
     }
     Ok(super::HelperHandles {
-      registration: socket.as_fd().try_clone_to_owned()?,
+      registration: stream.get_ref().delegate_fd()?,
       fence: self.helper_fence.as_ref().unwrap().try_clone()?,
     })
   }
@@ -320,13 +320,16 @@ pub(super) async fn exchange(
   } else {
     IO_TIMEOUT
   };
-  timeout(deadline, async {
-    write_json(stream.get_mut(), command).await?;
-    read_json::<Reply>(stream, CONTROL_LIMIT)
-      .await?
-      .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "turn authority disconnected"))
-  })
-  .await?
+  stream
+    .get_ref()
+    .reply_deadline(deadline)
+    .wait(async {
+      write_json(stream.get_mut(), command).await?;
+      read_json::<Reply>(stream, CONTROL_LIMIT)
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "turn authority disconnected"))
+    })
+    .await?
 }
 
 /// One host controller. The daemon binds turn tokens to this connection and

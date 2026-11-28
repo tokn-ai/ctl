@@ -1,8 +1,12 @@
 //! Frame transport on a dedicated daemon connection. Control/event streams
 //! never carry pixel data. Encoding and delivery are independent per viewer.
-use super::{Opening, endpoint, runtime, write_json};
-use crate::capture::{self, pool::Pool};
-use ctream_driver::{CaptureLifetime, CaptureSource, Result};
+use super::server::lane::{Gate, Phase};
+use super::{Opening, runtime, transport, write_json};
+use crate::capture::{
+  self,
+  pool::{Frames, Pool},
+};
+use ctream_driver::{CaptureLifetime, CaptureSource, Frame, Result};
 use ctream_proto::{CaptureFormat, Target, VideoRequest, valid_window_id};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -22,6 +26,10 @@ pub(super) struct SourceKey {
 }
 
 impl SourceKey {
+  pub(in crate::daemon) fn validate(&self) -> io::Result<()> {
+    self.selection().map(drop)
+  }
+
   fn selection(&self) -> io::Result<(Target, capture::Selection)> {
     let invalid = |msg| io::Error::new(io::ErrorKind::InvalidInput, msg);
     let target = Target::parse(&self.target).map_err(invalid)?;
@@ -87,13 +95,26 @@ fn subscribe(source: SourceKey) -> io::Result<capture::pool::Subscription> {
   })
 }
 
-async fn frames(source: SourceKey, output: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+async fn frames(
+  source: SourceKey,
+  output: &mut (impl AsyncWrite + Unpin),
+  gate: &Gate,
+) -> io::Result<()> {
   let mut frames = match subscribe(source) {
     Ok(frames) => frames,
     Err(error) => return send_error(output, error).await,
   };
   loop {
-    let frame = match frames.next().await {
+    let frame = match tokio::select! {
+      biased;
+      _ = gate.next_output_barrier() => {
+        // Switch only before a new frame. Once its dimensions are on the wire
+        // the continuation must supply every declared pixel to the encoder.
+        if gate.park(Phase::Freeze, Phase::Freeze, None).await { return Ok(()); }
+        continue;
+      }
+      next = frames.next() => next,
+    } {
       Ok(Some(frame)) => frame,
       Ok(None) => return Ok(()),
       Err(error) => return send_error(output, error).await,
@@ -113,11 +134,12 @@ pub(super) async fn serve(
   source: SourceKey,
   mut input: impl AsyncRead + Unpin,
   mut output: impl AsyncWrite + Unpin,
+  gate: &Gate,
 ) -> io::Result<()> {
   let mut eof = [0; 1];
   tokio::select! {
     _ = input.read(&mut eof) => Ok(()),
-    result = frames(source, &mut output) => result,
+    result = frames(source, &mut output, gate) => result,
   }
 }
 
@@ -126,65 +148,90 @@ struct ClientSource {
   format: CaptureFormat,
 }
 
+async fn receive_frames(
+  mut stream: impl AsyncRead + Unpin,
+  format: CaptureFormat,
+  frames: &Frames,
+) -> io::Result<()> {
+  let mut header = [0_u8; 8];
+  let mut pixels = Vec::new();
+  while stream.read(&mut header[..1]).await? != 0 {
+    stream.read_exact(&mut header[1..]).await?;
+    let width = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
+    let height = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
+    if width == 0 {
+      if height > ERROR_LIMIT {
+        return Err(io::Error::other("invalid capture error"));
+      }
+      let mut error = vec![0; height];
+      stream.read_exact(&mut error).await?;
+      return Err(io::Error::other(
+        String::from_utf8_lossy(&error).into_owned(),
+      ));
+    }
+    let size = [width, height];
+    let bytes = ctream_proto::video::pixel_count(size)? * 3;
+    if let CaptureFormat::FixedRgb { size: expected } = format
+      && expected != size
+    {
+      return Err(io::Error::other("unexpected fixed frame dimensions"));
+    }
+    pixels
+      .try_reserve(bytes.saturating_sub(pixels.len()))
+      .map_err(io::Error::other)?;
+    pixels.resize(bytes, 0);
+    stream.read_exact(&mut pixels).await?;
+    pixels = frames.publish(Frame { size, pixels });
+  }
+  Ok(())
+}
+
 impl CaptureSource for ClientSource {
   fn run<W: Write + Send>(self, output: &mut W, lifetime: &CaptureLifetime) -> Result<()> {
+    let cancellation = lifetime.cancellation();
+    let format = self.format;
+    let (frames, mut latest) = Frames::channel();
+    // A stalled stdout/encoder may keep drawing its last frame. Keep receiving
+    // on the shared I/O reactor so the private lane can complete a handoff.
+    // JoinSet aborts that task when the writer exits; stdin EOF also cancels it
+    // independently when a blocking OS write is still in progress.
+    let mut worker = tokio::task::JoinSet::new();
+    worker.spawn_on(
+      async move {
+        let receive = async {
+          let mut stream = transport::connect(None, false).await?;
+          write_json(
+            &mut stream,
+            &Opening::Capture {
+              source: self.source,
+            },
+          )
+          .await?;
+          receive_frames(stream, format, &frames).await
+        };
+        let cancelled = async {
+          while !cancellation.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+          }
+        };
+        tokio::select! { result = receive => result, () = cancelled => Ok(()) }
+      },
+      transport::background()?.handle(),
+    );
     runtime()?.block_on(async {
-      let receive = async {
-        let mut stream = endpoint::connect().await?;
-        write_json(
-          &mut stream,
-          &Opening::Capture {
-            source: self.source,
-          },
-        )
-        .await?;
-        let mut header = [0_u8; 8];
-        let mut buffer = vec![0_u8; 64 * 1024];
-        while stream.read(&mut header[..1]).await? != 0 {
-          stream.read_exact(&mut header[1..]).await?;
-          let first = u32::from_le_bytes(header[..4].try_into().unwrap()) as usize;
-          let second = u32::from_le_bytes(header[4..].try_into().unwrap()) as usize;
-          if first == 0 {
-            if second > ERROR_LIMIT {
-              return Err(io::Error::other("invalid capture error"));
-            }
-            stream.read_exact(&mut buffer[..second]).await?;
-            return Err(io::Error::other(
-              String::from_utf8_lossy(&buffer[..second]).into_owned(),
-            ));
-          }
-          let size = [first, second];
-          let mut remaining = ctream_proto::video::pixel_count(size)? * 3;
-          match self.format {
-            CaptureFormat::Ppm => write!(output, "P6\n{first} {second}\n255\n")?,
-            CaptureFormat::FixedRgb { size: expected } if size != expected => {
-              return Err(io::Error::other("unexpected fixed frame dimensions"));
-            }
-            CaptureFormat::FixedRgb { .. } => {}
-          }
-          while remaining > 0 {
-            let wanted = remaining.min(buffer.len());
-            let n = stream.read(&mut buffer[..wanted]).await?;
-            if n == 0 {
-              return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "incomplete capture frame",
-              ));
-            }
-            output.write_all(&buffer[..n])?;
-            remaining -= n;
-          }
-          output.flush()?;
+      while let Some(frame) = latest.next().await? {
+        if format == CaptureFormat::Ppm {
+          let [width, height] = frame.size;
+          write!(output, "P6\n{width} {height}\n255\n")?;
         }
-        Ok(())
-      };
-      let cancelled = async {
-        let cancellation = lifetime.cancellation();
-        while !cancellation.is_cancelled() {
-          tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-      };
-      tokio::select! { result = receive => result, () = cancelled => Ok(()) }
+        output.write_all(&frame.pixels)?;
+        output.flush()?;
+      }
+      worker
+        .join_next()
+        .await
+        .expect("one capture receiver")
+        .map_err(io::Error::other)?
     })?;
     Ok(())
   }
@@ -211,5 +258,40 @@ pub fn stream(
     selected.stream(source, video)
   } else {
     crate::runtime::stream_capture(source)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_stalled_encoder_can_resume_at_the_latest_complete_frame() {
+    let (mut host, input) = tokio::io::duplex(16);
+    let (frames, mut viewer) = Frames::channel();
+    let receive =
+      tokio::spawn(async move { receive_frames(input, CaptureFormat::Ppm, &frames).await });
+    async fn send(host: &mut (impl AsyncWrite + Unpin), byte: u8) {
+      host.write_u32_le(1).await.unwrap();
+      host.write_u32_le(1).await.unwrap();
+      host.write_all(&[byte; 3]).await.unwrap();
+    }
+    send(&mut host, 1).await;
+    let displayed = viewer.next().await.unwrap().unwrap();
+    send(&mut host, 2).await;
+    send(&mut host, 3).await;
+    // A torn frame from an ordinary socket loss must never enter the external
+    // encoder, even when that encoder is still writing the first frame.
+    host.write_u32_le(1).await.unwrap();
+    host.write_u32_le(1).await.unwrap();
+    host.write_all(&[4]).await.unwrap();
+    drop(host);
+    assert_eq!(
+      receive.await.unwrap().unwrap_err().kind(),
+      io::ErrorKind::UnexpectedEof
+    );
+    assert_eq!(displayed.pixels, [1; 3]);
+    assert_eq!(viewer.next().await.unwrap().unwrap().pixels, [3; 3]);
+    assert!(viewer.next().await.unwrap().is_none());
   }
 }

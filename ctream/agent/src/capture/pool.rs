@@ -22,6 +22,17 @@ pub struct Frames {
 }
 
 impl Frames {
+  pub(crate) fn channel() -> (Self, LatestFrames) {
+    let (updates, latest) = watch::channel(None);
+    (
+      Self {
+        updates,
+        status: SourceStatus::default(),
+      },
+      LatestFrames(latest),
+    )
+  }
+
   /// Revoke input leases immediately when a native capture ends, including
   /// while a viewer is backpressured writing its previous frame.
   pub fn end(&self) {
@@ -71,7 +82,7 @@ struct Entry {
 
 struct Active {
   status: SourceStatus,
-  latest: watch::Receiver<Update>,
+  latest: LatestFrames,
   _stop: mpsc::Sender<()>,
   cancellation: ctream_driver::CaptureCancellation,
 }
@@ -102,18 +113,19 @@ impl<K: Ord> Pool<K> {
     let entry = sources.get(&key);
     let existing = entry.and_then(|source| source.active.upgrade());
     let active = match existing
-      .filter(|source| !source.status.ended() && source.latest.has_changed().is_ok())
+      .filter(|source| !source.status.ended() && source.latest.0.has_changed().is_ok())
     {
       Some(active) => active,
       None => {
-        let (updates, latest) = watch::channel(None);
+        let (frames, latest) = Frames::channel();
+        let updates = frames.updates.clone();
         let (stop, closed) = mpsc::channel();
         let lifetime = CaptureLifetime::from_receiver(closed);
         let worker = entry
           .and_then(|source| source.worker.upgrade())
           .unwrap_or_default();
         let worker_key = Arc::downgrade(&worker);
-        let status = SourceStatus::default();
+        let status = frames.status.clone();
         let active = Arc::new(Active {
           status: status.clone(),
           latest,
@@ -123,18 +135,12 @@ impl<K: Ord> Pool<K> {
         thread::Builder::new()
           .name("ctream-capture-source".into())
           .spawn(move || {
-            let finished = Worker(status);
+            let _finished = Worker(status);
             let _exclusive = worker.lock().unwrap();
             if lifetime.cancelled(std::time::Duration::ZERO) {
               return;
             }
-            if let Err(error) = open(
-              Frames {
-                updates: updates.clone(),
-                status: finished.0.clone(),
-              },
-              lifetime,
-            ) {
+            if let Err(error) = open(frames, lifetime) {
               updates.send_replace(Some(Err(error.to_string().into())));
             }
           })?;
@@ -150,7 +156,7 @@ impl<K: Ord> Pool<K> {
     };
     let mut latest = active.latest.clone();
     // A late subscriber can start immediately from the current complete frame.
-    latest.mark_changed();
+    latest.0.mark_changed();
     Ok(Subscription {
       latest,
       _active: active,
@@ -159,7 +165,7 @@ impl<K: Ord> Pool<K> {
 }
 
 pub struct Subscription {
-  latest: watch::Receiver<Update>,
+  latest: LatestFrames,
   _active: Arc<Active>,
 }
 
@@ -169,8 +175,17 @@ impl Subscription {
   }
 
   pub async fn next(&mut self) -> io::Result<Option<Arc<Frame>>> {
-    while self.latest.changed().await.is_ok() {
-      if let Some(update) = self.latest.borrow_and_update().clone() {
+    self.latest.next().await
+  }
+}
+
+#[derive(Clone)]
+pub(crate) struct LatestFrames(watch::Receiver<Update>);
+
+impl LatestFrames {
+  pub(crate) async fn next(&mut self) -> io::Result<Option<Arc<Frame>>> {
+    while self.0.changed().await.is_ok() {
+      if let Some(update) = self.0.borrow_and_update().clone() {
         return update
           .map(Some)
           .map_err(|message| io::Error::other(message.to_string()));

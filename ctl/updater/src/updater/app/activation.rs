@@ -58,7 +58,39 @@ pub(super) struct Workspace {
   downloads: PathBuf,
   staging: PathBuf,
   destination: PathBuf,
-  _lock: File,
+  _lock: DesktopLock,
+}
+
+struct DesktopLock(File);
+
+impl DesktopLock {
+  fn acquire(path: &Path) -> io::Result<Self> {
+    let file = private_fs::options()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(false)
+      .open(path)?;
+    if !private_fs::is_private_file(&file.metadata()?) {
+      return Err(invalid("desktop install lock must be a private owned file"));
+    }
+    file.try_lock().map_err(|error| match error {
+      fs::TryLockError::WouldBlock => io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "another ctmux desktop installation is in progress",
+      ),
+      fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(Self(file))
+  }
+}
+
+impl Drop for DesktopLock {
+  fn drop(&mut self) {
+    // A concurrent child can inherit the descriptor until it execs, even
+    // with close-on-exec set. Release the lock before closing our handle.
+    let _ = self.0.unlock();
+  }
 }
 
 impl Workspace {
@@ -71,22 +103,7 @@ impl Workspace {
     ensure_directory(&root)?;
     let state = root.join("state");
     ensure_directory(&state)?;
-    let lock = private_fs::options()
-      .read(true)
-      .write(true)
-      .create(true)
-      .truncate(false)
-      .open(state.join("desktop.lock"))?;
-    if !private_fs::is_private_file(&lock.metadata()?) {
-      return Err(invalid("desktop install lock must be a private owned file"));
-    }
-    lock.try_lock().map_err(|error| match error {
-      fs::TryLockError::WouldBlock => io::Error::new(
-        io::ErrorKind::WouldBlock,
-        "another ctmux desktop installation is in progress",
-      ),
-      fs::TryLockError::Error(error) => error,
-    })?;
+    let lock = DesktopLock::acquire(&state.join("desktop.lock"))?;
     let store = ensure_subdirectories(&root, ["store", "desktop"])?;
     let downloads = ensure_subdirectories(&root, ["cache", "downloads", "desktop"])?;
     let staging_root = ensure_subdirectories(&root, ["staging"])?;
@@ -880,11 +897,7 @@ mod tests {
         downloads,
         staging,
         destination,
-        _lock: private_fs::options()
-          .write(true)
-          .create_new(true)
-          .open(lock)
-          .unwrap(),
+        _lock: DesktopLock::acquire(&lock).unwrap(),
       }
     }
 
@@ -917,6 +930,20 @@ mod tests {
     fn drop(&mut self) {
       fs::remove_dir_all(&self.0).unwrap();
     }
+  }
+
+  #[test]
+  fn desktop_lock_releases_while_an_inherited_handle_is_open() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("desktop.lock");
+    let lock = DesktopLock::acquire(&path).unwrap();
+    let inherited = lock.0.try_clone().unwrap();
+    assert!(
+      matches!(DesktopLock::acquire(&path), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+    );
+    drop(lock);
+    let _lock = DesktopLock::acquire(&path).unwrap();
+    drop(inherited);
   }
 
   #[test]

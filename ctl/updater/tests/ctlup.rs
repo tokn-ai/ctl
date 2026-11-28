@@ -350,6 +350,53 @@ fn passive_status_and_metadata_do_not_prepare_an_installation() {
 }
 
 #[test]
+fn updater_status_reports_its_tracked_channel_without_a_runtime() {
+  use ctl_core::component_update::BundleChannel;
+  use ctl_core::installations::{CatalogOrigin, Installations};
+
+  let home = Home::new();
+  let status = || {
+    let output = home
+      .command(&["status", "updater", "--json"])
+      .output()
+      .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+  };
+  assert!(status()["active"].is_null());
+  assert!(!home.registry().exists());
+
+  let store = Installations::new(&home.0);
+  let origin = CatalogOrigin {
+    channel: "nightly".into(),
+    publication_id: Some("0.1.2-dev.aaaaaaaaaaaa".into()),
+    built_at: Some("2026-01-01T00:00:00Z".into()),
+  };
+  let (components, _) = fixture_payload('a');
+  let bytes = b"sample updater";
+  store
+    .select_manager_channel(
+      bytes,
+      &components["ctl"].build,
+      &origin,
+      BundleChannel::Nightly,
+      None,
+    )
+    .unwrap();
+
+  let output = home.command(&["updater-channel-tracked"]).output().unwrap();
+  assert!(output.status.success(), "{output:?}");
+  let value = status();
+  assert_eq!(
+    value["active"].as_str(),
+    store.active_manager_id().unwrap().as_deref()
+  );
+  assert_eq!(value["tracked_channel"], "nightly");
+  assert_eq!(value["build"]["source_revision"], "a".repeat(40));
+  assert!(store.active().unwrap().is_none());
+}
+
+#[test]
 fn empty_status_explains_managed_installations_and_scopes_the_development_hint() {
   let home = Home::new();
   let output = home

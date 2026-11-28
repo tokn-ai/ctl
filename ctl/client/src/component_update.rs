@@ -893,7 +893,7 @@ fn require_shared_services(manifest: &Manifest) -> io::Result<()> {
   Ok(())
 }
 
-fn publisher_target(target: &str, purpose: Purpose) -> std::borrow::Cow<'_, str> {
+pub(crate) fn publisher_target(target: &str, purpose: Purpose) -> std::borrow::Cow<'_, str> {
   // Publisher bundles provide portable musl artifacts for GNU Linux clients.
   if purpose == Purpose::Local
     && let Some(arch) = target.strip_suffix("-unknown-linux-gnu")

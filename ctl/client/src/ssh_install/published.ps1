@@ -10,7 +10,12 @@ Phase 'checking-updater'
 $dir = New-UpdaterStaging
 $file = Join-Path $dir 'ctlup.exe'
 try {
-  if (Copy-RetainedUpdater $file $size $sha) {
+  $manager = $file
+  $installed = Find-InstalledUpdater
+  if ($installed -and (Test-TrackedUpdater $installed)) {
+    $manager = $installed
+    Phase 'using-installed-updater'
+  } elseif (Copy-RetainedUpdater $file $size $sha) {
     Phase 'using-installed-updater'
   } elseif ($localUpdater -eq '1') {
     Phase 'uploading-updater'
@@ -47,15 +52,15 @@ try {
     if (!(Test-StagedUpdater $file $size $sha)) { throw 'Published ctlup size or checksum mismatch.' }
   }
   __CHECKOUT_LAYOUT_GUARD__
-  Assert-CheckoutLayout $file
+  Assert-CheckoutLayout $manager
   $ErrorActionPreference = 'Continue'
-  $help = $null | & $file install-publication --help 2>&1
+  $help = $null | & $manager install-publication --help 2>&1
   $code = $LASTEXITCODE
   $ErrorActionPreference = 'Stop'
   if ($code -eq 2 -and ($help | Out-String).Contains("unrecognized subcommand 'install-publication'")) { Unavailable }
   if ($code -ne 0) { throw 'Remote ctlup capability check failed.' }
   $start = [Diagnostics.ProcessStartInfo]::new()
-  $start.FileName = $file
+  $start.FileName = $manager
   $start.Arguments = 'install-publication --origin-hex ' + $origin + ' --archive-url "' + $archive + '" --target ' + $target + ' --manifest-bytes ' + $manifestBytes
   if ($localRuntime -eq '1') {
     Phase 'uploading-runtime'

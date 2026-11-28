@@ -3,6 +3,8 @@
 use super::Installations;
 use super::filesystem::{self, invalid};
 use crate::bundles::Bundle;
+use crate::component::ComponentBuildInfo;
+use crate::component_update::BundleChannel;
 use crate::private_fs::{options, sync_directory};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,11 +18,12 @@ const UPDATER_PATHS: &str = "updater-paths.json";
 const RUNTIME_BUILD_PATHS: &str = "runtime-build-paths.json";
 const UPDATER_BUILD_PATHS: &str = "updater-build-paths.json";
 const UPDATER_OBJECT_PATHS: &str = "updater-object-paths.json";
+const UPDATER_SELECTION: &str = "updater-selection.json";
 const DESKTOP_OBJECT_PATHS: &str = "desktop-object-paths.json";
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRIES: usize = 4096;
 
-/// The publication or explicit source that supplied installed target bundles.
+/// The publication or explicit source that supplied an installed build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogOrigin {
@@ -48,6 +51,60 @@ impl CatalogOrigin {
       .is_some_and(|date| !utc_timestamp(date))
     {
       return Err(invalid("invalid installation provenance"));
+    }
+    Ok(())
+  }
+}
+
+/// Identity and source of the updater selected for future invocations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdaterSelection {
+  pub content_id: String,
+  pub build: ComponentBuildInfo,
+  pub origin: Option<CatalogOrigin>,
+  /// Explicitly followed channel, independent of the runtime's source.
+  pub tracked_channel: Option<BundleChannel>,
+}
+
+impl UpdaterSelection {
+  pub(super) fn validate(&self) -> io::Result<()> {
+    if !crate::bundles::valid_digest(&self.content_id) || !self.build.is_valid() {
+      return Err(invalid("invalid installed updater build identity"));
+    }
+    if let Some(origin) = &self.origin {
+      origin.validate()?;
+    }
+    if let Some(channel) = self.tracked_channel
+      && self.origin.as_ref().map(|origin| origin.channel.as_str()) != Some(channel.name())
+    {
+      return Err(invalid("tracked updater channel differs from its origin"));
+    }
+    Ok(())
+  }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UpdaterSelections {
+  schema_version: u16,
+  entries: Vec<UpdaterSelection>,
+}
+
+impl UpdaterSelections {
+  fn validate(&self) -> io::Result<()> {
+    if self.schema_version != 1 || self.entries.len() > 2 {
+      return Err(invalid(
+        "unsupported or oversized updater selection metadata",
+      ));
+    }
+    for entry in &self.entries {
+      entry.validate()?;
+    }
+    if let [old, next] = self.entries.as_slice()
+      && old.content_id == next.content_id
+    {
+      return Err(invalid("duplicate updater selection identity"));
     }
     Ok(())
   }
@@ -674,6 +731,46 @@ pub(super) fn read_index(store: &Installations) -> io::Result<State> {
   state.desktop_paths = read_file(&root.join(DESKTOP_OBJECT_PATHS))?.unwrap_or_default();
   state.validate_index()?;
   Ok(state)
+}
+
+pub(super) fn read_updater_selection(
+  store: &Installations,
+  active: Option<&str>,
+) -> io::Result<Option<UpdaterSelection>> {
+  let Some(active) = active else {
+    return Ok(None);
+  };
+  let path = store.state_root().join(UPDATER_SELECTION);
+  let Some(selections) = read_file::<UpdaterSelections>(&path)? else {
+    return Ok(None);
+  };
+  selections.validate()?;
+  Ok(
+    selections
+      .entries
+      .into_iter()
+      .find(|entry| entry.content_id == active),
+  )
+}
+
+// Keep the previous identity readable until the unchanged registry switches
+// its digest pointer, including when a process stops between the two commits.
+pub(super) fn commit_updater_selection(
+  store: &Installations,
+  previous: Option<UpdaterSelection>,
+  selection: &UpdaterSelection,
+) -> io::Result<()> {
+  let mut entries = Vec::with_capacity(2);
+  if let Some(previous) = previous.filter(|previous| previous.content_id != selection.content_id) {
+    entries.push(previous);
+  }
+  entries.push(selection.clone());
+  let selections = UpdaterSelections {
+    schema_version: 1,
+    entries,
+  };
+  selections.validate()?;
+  replace(&store.state_root().join(UPDATER_SELECTION), &selections)
 }
 
 pub(super) fn commit_runtime_paths(store: &Installations, paths: &PathIndex) -> io::Result<()> {

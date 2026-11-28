@@ -74,6 +74,15 @@ function Find-InstalledUpdater {
   return $path
 }
 
+function Test-TrackedUpdater($manager) {
+  $preference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $null | & $manager updater-channel-tracked *> $null
+    return ($LASTEXITCODE -eq 0)
+  } finally { $ErrorActionPreference = $preference }
+}
+
 function Test-StagedUpdater($file, [long]$size, $sha) {
   return ((Get-Item -LiteralPath $file).Length -eq $size -and (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $sha)
 }

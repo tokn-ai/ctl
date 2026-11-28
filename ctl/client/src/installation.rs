@@ -25,7 +25,8 @@ pub use show::{InstallationShow, InstalledBuild, show};
 #[cfg(target_os = "macos")]
 pub(crate) use updater::provision_runtime_signing_manager;
 pub use updater::{
-  provision_manager, provision_manager_from, updater_for_bundle, updater_for_manifest,
+  provision_manager, provision_manager_from, resolve_native_updater, select_published_manager,
+  updater_for_bundle, updater_for_manifest,
 };
 pub(crate) use updater::{
   provision_manager_bytes, provision_manager_from_for_build, provision_manager_with_origin,

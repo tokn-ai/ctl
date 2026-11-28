@@ -9,6 +9,11 @@ export interface DesktopBuildInfo {
   version: string;
   source_revision: string | null;
 }
+export interface UpdaterBuildInfo {
+  version: string;
+  channel: string | null;
+  source_revision: string | null;
+}
 export interface ComponentBuildInfo {
   version: string;
   source_revision: string | null;

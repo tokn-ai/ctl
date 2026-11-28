@@ -13,12 +13,13 @@ mod windows_tests;
 
 use crate::bundles::{Bundle, Manifest};
 use crate::component::ComponentBuildInfo;
+use crate::component_update::BundleChannel;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub use catalog::{CatalogEntry, CatalogOrigin, DesktopSelection, DesktopSource};
+pub use catalog::{CatalogEntry, CatalogOrigin, DesktopSelection, DesktopSource, UpdaterSelection};
 pub use leases::{Lease, lease_current_executable};
 
 /// Local updater capability for the installed payload layout.
@@ -245,6 +246,20 @@ impl Installations {
     Ok(catalog::read_index(self)?.updater)
   }
 
+  /// Reads recorded updater provenance even when the selected bytes are missing.
+  /// Legacy updaters may have a content identity without provenance metadata.
+  ///
+  /// # Errors
+  /// Reports unsafe storage or invalid registry or updater metadata.
+  pub fn updater_selection(&self) -> io::Result<Option<UpdaterSelection>> {
+    if !filesystem::root_exists(self)? {
+      return Ok(None);
+    }
+    let _lock = filesystem::Lock::acquire(self)?;
+    let state = catalog::read_index(self)?;
+    catalog::read_updater_selection(self, state.updater.as_deref())
+  }
+
   /// Reads the recorded complete active payload through its canonical selection.
   ///
   /// # Errors
@@ -286,8 +301,8 @@ impl Installations {
     Ok(Some((bundle, lease)))
   }
 
-  /// Publishes a verified updater and selects it for future invocations.
-  /// Existing invocations continue using their leased updater payloads.
+  /// Provisions a verified updater for future invocations, keeping any
+  /// explicitly tracked updater. Existing invocations retain their leases.
   ///
   /// # Errors
   /// Reports unsafe storage, damaged aliases or collisions with other commands.
@@ -297,11 +312,41 @@ impl Installations {
     build: &ComponentBuildInfo,
     origin: Option<&CatalogOrigin>,
   ) -> io::Result<()> {
-    filesystem::install_manager(self, updater, build, origin, false)
+    filesystem::install_manager(
+      self,
+      updater,
+      build,
+      origin,
+      filesystem::ManagerSelection::Provision {
+        refresh_launcher: false,
+      },
+    )
   }
 
-  /// Selects a verified macOS updater and refreshes the stable launcher to use
-  /// the same helper resolution logic for runtimes from earlier publications.
+  /// Selects a verified updater and follows its publication channel.
+  /// Pass the observed metadata, or `None` when no metadata was recorded.
+  ///
+  /// # Errors
+  /// Reports a stale selection, unsafe storage or conflicting aliases.
+  pub fn select_manager_channel(
+    &self,
+    updater: &[u8],
+    build: &ComponentBuildInfo,
+    origin: &CatalogOrigin,
+    channel: BundleChannel,
+    expected: Option<&UpdaterSelection>,
+  ) -> io::Result<()> {
+    filesystem::install_manager(
+      self,
+      updater,
+      build,
+      Some(origin),
+      filesystem::ManagerSelection::Track { channel, expected },
+    )
+  }
+
+  /// Provisions a verified macOS updater and refreshes the stable launcher
+  /// from the selected updater for runtimes from earlier publications.
   ///
   /// # Errors
   /// Reports unsafe storage, damaged aliases or collisions with other commands.
@@ -312,7 +357,15 @@ impl Installations {
     build: &ComponentBuildInfo,
     origin: Option<&CatalogOrigin>,
   ) -> io::Result<()> {
-    filesystem::install_manager(self, updater, build, origin, true)
+    filesystem::install_manager(
+      self,
+      updater,
+      build,
+      origin,
+      filesystem::ManagerSelection::Provision {
+        refresh_launcher: true,
+      },
+    )
   }
 
   /// Reads retained updater bytes after verifying their exact digest.

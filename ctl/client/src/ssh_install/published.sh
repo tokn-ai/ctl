@@ -77,7 +77,11 @@ copy_retained_updater() {
   [ "$(length "$managed")" -eq "$size" ] || fail 'Installed ctlup size or checksum mismatch.'
   (ulimit -f "$blocks" && cp "$managed" "$file") && verified || fail 'Installed ctlup size or checksum mismatch.'
 }
-if copy_retained_updater; then
+manager="$file"
+if existing_updater_launcher && updater_tracks_channel; then
+  manager="$updater_entrypoint"
+  printf 'ctl-published-stage-v1 using-installed-updater\n'
+elif copy_retained_updater; then
   printf 'ctl-published-stage-v1 using-installed-updater\n'
 elif [ "$local_updater" = 1 ]; then
   printf 'ctl-published-stage-v1 uploading-updater\n'
@@ -125,11 +129,11 @@ else
   [ "$fetched" = yes ] || unavailable
   verified || fail 'Downloaded ctlup size or checksum differs from the publication.'
 fi
-chmod 700 "$file"
+[ "$manager" != "$file" ] || chmod 700 "$file"
 __CHECKOUT_LAYOUT_GUARD__
-require_checkout_layout "$file"
+require_checkout_layout "$manager"
 code=0
-help=$("$file" install-publication --help </dev/null 2>&1) || code=$?
+help=$("$manager" install-publication --help </dev/null 2>&1) || code=$?
 if [ "$code" -ne 0 ]; then
   case "$code:$help" in 2:*"unrecognized subcommand 'install-publication'"*) unavailable;; esac
   fail 'Remote ctlup capability check failed.'
@@ -141,4 +145,4 @@ if [ "$local_runtime" = 1 ]; then
 else
   printf 'ctl-published-stage-v1 installing-runtime\n'
 fi
-"$file" "$@"
+"$manager" "$@"

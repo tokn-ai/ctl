@@ -68,6 +68,7 @@ fn windows_bootstrap_keeps_pinned_metadata_off_the_command_line_and_fits_cmd() {
   assert!(script.contains("SetAccessRuleProtection($true, $false)"));
   assert!(script.contains("Copy-UpdaterOutput $manager ('export-manager --sha256 ' + $sha)"));
   assert!(script.contains("Assert-PlainUpdaterPath $path"));
+  assert!(script.contains("if ($installed -and (Test-TrackedUpdater $installed))"));
   assert!(script.contains("Get-FileHash -LiteralPath $file"));
   assert!(script.contains("--manifest-bytes"));
 }
@@ -238,6 +239,48 @@ cat "$HOME/managed-manifest"
       let curl = fs::read_to_string(host.0.join("curl-args")).unwrap();
       assert_eq!(curl.lines().last(), Some(URL));
       assert_eq!(host.0.join("wget-args").exists(), use_wget);
+    }
+  }
+
+  #[tokio::test]
+  async fn direct_install_reuses_the_tracked_updater_with_a_different_digest() {
+    use PublishedInstallStage as Stage;
+    use std::os::unix::fs::symlink;
+    let _process_guard = ctl_core::test_fixtures::ProcessGuard::acquire().await;
+
+    let host = Host::new();
+    let bin = host.0.join(".tokn/ctl/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let launcher = bin.join(".ctl-launcher");
+    let bundled = helper();
+    let tracked = bundled.replacen(
+      "set -eu\n",
+      "set -eu\nif [ \"$1\" = updater-channel-tracked ]; then exit 0; fi\n",
+      1,
+    );
+    fs::write(&launcher, tracked.as_bytes()).unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(".ctl-launcher", bin.join("ctlup")).unwrap();
+
+    let archive = b"\0binary\xffarchive";
+    for (cached_updater, cached_runtime, install_stage) in [
+      (Some(bundled.as_bytes()), None, Stage::InstallingRuntime),
+      (None, Some(archive.as_slice()), Stage::UploadingRuntime),
+    ] {
+      let (result, phases) = host.install(cached_updater, cached_runtime).await;
+      assert!(result.unwrap().is_some());
+      assert_eq!(
+        &phases[..3],
+        [
+          Stage::CheckingUpdater,
+          Stage::UsingInstalledUpdater,
+          install_stage
+        ]
+      );
+      assert!(!host.0.join("curl-args").exists());
+      let expected = [MANIFEST, cached_runtime.unwrap_or_default()].concat();
+      assert_eq!(fs::read(host.0.join("received")).unwrap(), expected);
+      assert_eq!(fs::read(&launcher).unwrap(), tracked.as_bytes());
     }
   }
 

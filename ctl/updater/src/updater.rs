@@ -15,6 +15,7 @@ mod ctream;
 mod development;
 #[cfg(any(unix, windows))]
 mod launcher;
+mod manager;
 mod release;
 mod remote;
 mod show;
@@ -49,6 +50,10 @@ pub(crate) fn main() {
   let arguments = Arguments::parse();
   if matches!(arguments.command, Command::InstallationLayoutVersion) {
     println!("{}", ctl_core::installations::DEVELOPMENT_LAYOUT_VERSION);
+    return;
+  }
+  if matches!(arguments.command, Command::UpdaterChannelVersion) {
+    println!("1");
     return;
   }
   #[cfg(target_os = "macos")]
@@ -92,7 +97,11 @@ pub(crate) fn main() {
 async fn run(arguments: Arguments) -> io::Result<i32> {
   let home = dirs::home_dir().ok_or_else(|| io::Error::other("home directory is unavailable"))?;
   match arguments.command {
-    Command::ComponentInfo | Command::InstallationLayoutVersion => unreachable!(),
+    Command::ComponentInfo
+    | Command::InstallationLayoutVersion
+    | Command::UpdaterChannelVersion => {
+      unreachable!()
+    }
     #[cfg(target_os = "macos")]
     Command::MacosRuntimeSigningVersion => unreachable!(),
     Command::Install(options) => run_install(&home, &options).await?,
@@ -125,21 +134,7 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
       ctl_client::installation::provision_manager_from(&home, &std::env::current_exe()?).await?;
     }
     Command::ExportManager { sha256 } => {
-      return tokio::task::spawn_blocking(move || {
-        use std::io::Write as _;
-
-        let Some(bytes) =
-          ctl_core::installations::Installations::new(&home).manager_bytes(&sha256)?
-        else {
-          return Ok(10);
-        };
-        let mut output = io::stdout().lock();
-        output.write_all(&bytes)?;
-        output.flush()?;
-        Ok(0)
-      })
-      .await
-      .map_err(io::Error::other)?;
+      return manager::export(&home, sha256).await;
     }
     Command::Dev(options) => development::run(&home, options).await?,
     Command::Sign(options) => sign::run(&home, options).await?,
@@ -184,6 +179,14 @@ async fn run(arguments: Arguments) -> io::Result<i32> {
     Command::UpdaterDigest => {
       print_updater_digest(&std::env::current_exe()?)?;
     }
+    Command::UpdaterChannelTracked => {
+      let selection = ctl_core::installations::Installations::new(&home).updater_selection()?;
+      return Ok(i32::from(
+        selection
+          .and_then(|selection| selection.tracked_channel)
+          .is_none(),
+      ));
+    }
   }
   Ok(0)
 }
@@ -196,6 +199,18 @@ async fn run_install(home: &Path, options: &arguments::InstallArguments) -> io::
     return update::install(home, options, &targets).await;
   }
   require_local(targets[0])?;
+  if options.package == arguments::PackageSelection::Updater {
+    if options.release.is_some()
+      || options.pr.is_some()
+      || options.from.is_some()
+      || signing.is_some()
+    {
+      return Err(io::Error::other(
+        "updater installation accepts a published channel (--channel stable or nightly)",
+      ));
+    }
+    return manager::install(home, options.channel.map(Into::into), options.json).await;
+  }
   if options.local_build || options.ctld_package.is_some() {
     return Err(io::Error::other(
       "native runtime file options require the runtime package",
@@ -226,6 +241,14 @@ async fn run_update(home: &Path, options: &arguments::UpdateArguments) -> io::Re
     return update::run(home, &targets, options.check, signing, options.json).await;
   }
   require_local(targets[0])?;
+  if options.package == arguments::PackageSelection::Updater {
+    if signing.is_some() {
+      return Err(io::Error::other(
+        "signing options apply to the app and runtime",
+      ));
+    }
+    return manager::update(home, options.check, options.json).await;
+  }
   #[cfg(any(target_os = "macos", target_os = "linux", windows))]
   {
     app::update(home, options.check, signing, options.json).await
@@ -254,6 +277,9 @@ async fn run_status(home: &Path, options: &arguments::StatusArguments) -> io::Re
     return status::run(home, &targets, options.json).await;
   }
   require_local(targets[0])?;
+  if options.package == arguments::PackageSelection::Updater {
+    return manager::status(home, options.json).await;
+  }
   #[cfg(any(target_os = "macos", target_os = "linux", windows))]
   {
     app::status(home, options.json)

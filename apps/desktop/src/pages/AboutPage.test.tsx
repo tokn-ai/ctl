@@ -15,7 +15,7 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("../lib/tauri", () => ({
   getDesktopBuild: api.desktop,
-  getUpdaterVersion: api.updater,
+  getUpdaterBuild: api.updater,
   fetchAboutRuntimeTarget: api.fetch,
   getAboutRuntimeStatus: api.runtime,
   syncAboutRuntime: api.sync,
@@ -67,7 +67,7 @@ beforeEach(() => {
   notifications = new NotificationStore();
   vi.resetAllMocks();
   api.desktop.mockResolvedValue({ version: "0.1.5", channel: "local", source_revision: "12121212".repeat(5) });
-  api.updater.mockResolvedValue("0.1.3");
+  api.updater.mockResolvedValue({ version: "0.1.3", channel: "stable", source_revision: null });
   api.runtime.mockResolvedValue({ active: null, build_label: null, missing: false, origin: null });
   api.sync.mockResolvedValue({ state: "installed" });
   api.bundles.mockResolvedValue({ bundles: [], errors: [] });

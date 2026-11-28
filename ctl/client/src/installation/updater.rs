@@ -1,9 +1,81 @@
 use ctl_core::bundles::Bundle;
 use ctl_core::component::ComponentBuildInfo;
-use ctl_core::installations::{CatalogOrigin, DEVELOPMENT_LAYOUT_VERSION, Installations};
+use ctl_core::component_update::BundleChannel;
+use ctl_core::installations::{
+  CatalogOrigin, DEVELOPMENT_LAYOUT_VERSION, Installations, UpdaterSelection,
+};
 use ctl_core::private_fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::remote_bundle::published::{self, PublishedUpdater};
+
+/// Resolve the channel's updater for this machine, without fetching its binary.
+/// # Errors
+/// Reports unsupported targets, unavailable channels and invalid publication metadata.
+pub async fn resolve_native_updater(channel: BundleChannel) -> io::Result<PublishedUpdater> {
+  let target = crate::component_update::publisher_target(
+    ctl_core::paths::native_target(),
+    ctl_core::bundles::Purpose::Local,
+  );
+  published::resolve_updater(channel, &target)
+    .await
+    .map_err(io::Error::other)
+}
+
+/// Verify and select the updater from the resolved publication without changing the runtime.
+/// # Errors
+/// Rejects damaged downloads, unsupported updater executables, unsafe profiles and concurrent changes.
+pub async fn select_published_manager(
+  home: &Path,
+  publication: PublishedUpdater,
+  channel: BundleChannel,
+  expected: Option<UpdaterSelection>,
+) -> io::Result<()> {
+  let cache = ctl_core::paths::updater_directory_for_account(home).join("cache/updaters");
+  let updater = publication
+    .download_cached(&cache)
+    .await
+    .map_err(io::Error::other)?;
+  let stage = stage_manager(home, updater.bytes).await?;
+  let (bytes, build) = verified_native_updater(&stage.0).await?;
+  if build != publication.build {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "ctlup build differs from its verified publication",
+    ));
+  }
+  let channel_version = updater_output(&stage.0, "updater-channel-version")
+    .await?
+    .and_then(|output| String::from_utf8(output).ok())
+    .and_then(|output| output.trim().parse::<u16>().ok());
+  if channel_version.is_none_or(|version| version < 1)
+    || !supports_manager_requirements(&stage.0, cfg!(target_os = "macos")).await
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      format!(
+        "the published {} ctlup {} predates independent updater channels; select a newer publication when available",
+        channel.name(),
+        build.version,
+      ),
+    ));
+  }
+  let lock = lock_manager_provisioning(home).await?;
+  let store = Installations::new(home);
+  tokio::task::spawn_blocking(move || {
+    let _lock = lock;
+    store.select_manager_channel(
+      &bytes,
+      &build,
+      &publication.origin,
+      channel,
+      expected.as_ref(),
+    )
+  })
+  .await
+  .map_err(io::Error::other)?
+}
 
 /// Resolve a verified target updater, independently of the active runtime build.
 /// Native executions can bootstrap from their installed/sibling manager. Foreign
@@ -107,11 +179,39 @@ async fn provision_manager_candidate(
   if let Some((origin, _)) = provenance {
     origin.validate()?;
   }
+  let lock = lock_manager_provisioning(home).await?;
+  let installations = Installations::new(home);
+  if installations
+    .updater_selection()?
+    .is_some_and(|selection| selection.tracked_channel.is_some())
+  {
+    #[cfg(target_os = "macos")]
+    if require_runtime_signing {
+      let (path, _lease) = installations.manager_and_lease()?.ok_or_else(|| {
+        io::Error::new(
+          io::ErrorKind::NotFound,
+          "selected updater is missing; run ctlup update updater",
+        )
+      })?;
+      if !supports_manager_requirements(&path, true).await {
+        return Err(io::Error::other(
+          "macOS runtime signing requires a compatible updater; run ctlup update updater",
+        ));
+      }
+      let (bytes, build) = verified_native_updater(&path).await?;
+      return tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        installations.install_manager_and_refresh_launcher(&bytes, &build, None)
+      })
+      .await
+      .map_err(io::Error::other)?;
+    }
+    return Ok(());
+  }
   let mut stage = stage_manager(home, bytes).await?;
   // Probe the exact staged bytes, including architecture and command identity.
   let (mut verified, mut build) = verified_native_updater(&stage.0).await?;
   let capable = supports_manager_requirements(&stage.0, require_runtime_signing).await;
-  let lock = lock_manager_provisioning(home).await?;
   if !capable {
     if !require_runtime_signing && installed_supports_development_layout(home).await? {
       return Ok(());

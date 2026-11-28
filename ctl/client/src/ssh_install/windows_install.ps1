@@ -13,6 +13,7 @@ public static class CtlStdin {
 $handle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([CtlStdin]::GetStdHandle(-10), $false)
 $inputStream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read, 1)
 $remaining = __UPDATER_PREFIX_BYTES__
+$hasUpdaterPrefix = $remaining -gt 0
 $size = __UPDATER_SIZE__
 $sha = '__UPDATER_SHA256__'
 $dir = $null
@@ -20,7 +21,7 @@ $stage = $null
 try {
   $dir = New-UpdaterStaging
   $stage = Join-Path $dir 'ctlup.exe'
-  if ($remaining) {
+  if ($hasUpdaterPrefix) {
     $file = [IO.File]::Open($stage, 'CreateNew', 'Write', 'None')
     try {
       $buffer = [byte[]]::new(65536)
@@ -34,10 +35,15 @@ try {
     if (!(Test-StagedUpdater $stage $size $sha)) {
       throw 'ctlup executable failed checksum verification.'
     }
-  } elseif (!(Copy-RetainedUpdater $stage $size $sha)) {
-    throw 'The selected ctlup changed during the update.'
   }
-  $manager = $stage
+  $manager = Find-InstalledUpdater
+  if (!$manager -or !(Test-TrackedUpdater $manager)) {
+    if (__REQUIRE_TRACKED_UPDATER__) { throw 'The tracked ctlup changed during the update.' }
+    if (!$hasUpdaterPrefix -and !(Copy-RetainedUpdater $stage $size $sha)) {
+      throw 'The selected ctlup changed during the update.'
+    }
+    $manager = $stage
+  }
   __UPDATE_PREPARATION__
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.FileName = $manager

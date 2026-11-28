@@ -65,6 +65,7 @@ import type {
   VpnSnapshot,
   ComponentVersionsSnapshot,
   DesktopBuildInfo,
+  UpdaterBuildInfo,
   ComponentBundlesSnapshot,
   ComponentBundleSelection,
   ComponentBundleSelectionResult,
@@ -133,8 +134,8 @@ export function getDesktopBuild(): Promise<DesktopBuildInfo> {
   return invoke("get_desktop_build");
 }
 
-export function getUpdaterVersion(): Promise<string> {
-  return invoke("get_updater_version");
+export function getUpdaterBuild(): Promise<UpdaterBuildInfo> {
+  return invoke("get_updater_build");
 }
 
 export async function getComponentVersions(host_id?: string): Promise<ComponentVersionsSnapshot> {

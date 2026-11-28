@@ -19,6 +19,13 @@ use tokio::sync::watch;
 mod manager;
 
 #[derive(Serialize)]
+pub(crate) struct UpdaterBuildInfo {
+  version: String,
+  channel: Option<String>,
+  source_revision: Option<String>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct AboutRuntimeStatus {
   active: Option<String>,
   build_label: Option<String>,
@@ -383,8 +390,8 @@ fn home() -> CommandResult<std::path::PathBuf> {
 }
 
 #[tauri::command]
-pub(crate) async fn get_updater_version() -> CommandResult<String> {
-  manager::selected_version(&home()?).await
+pub(crate) async fn get_updater_build() -> CommandResult<UpdaterBuildInfo> {
+  manager::selected_build(&home()?).await
 }
 
 fn start_operation(

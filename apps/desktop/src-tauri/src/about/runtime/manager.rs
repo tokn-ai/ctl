@@ -1,6 +1,6 @@
 //! Select a compatible native ctlup and run it without a terminal.
 
-use super::SavedTarget;
+use super::{SavedTarget, UpdaterBuildInfo};
 use crate::error::{CommandErrorDto, CommandResult};
 use ctl_core::component_update::BundleChannel;
 use ctl_core::installations::{Installations, Lease};
@@ -156,12 +156,36 @@ async fn probe(path: &Path, flag: &str, cancelled: &watch::Receiver<bool>) -> io
   run(command, Duration::from_secs(5), cancelled.clone(), None).await
 }
 
-pub(super) async fn selected_version(home: &Path) -> CommandResult<String> {
+pub(super) async fn selected_build(home: &Path) -> CommandResult<UpdaterBuildInfo> {
   let (_stop, cancelled) = watch::channel(false);
-  let (path, _lease) = selected_manager(home, cancelled.clone(), Duration::from_secs(5)).await?;
-  read_version(&path, &cancelled)
+  let (path, lease) = selected_manager(home, cancelled.clone(), Duration::from_secs(5)).await?;
+  let version = read_version(&path, &cancelled)
     .await
-    .map_err(CommandErrorDto::backend)
+    .map_err(CommandErrorDto::backend)?;
+  let selection = if let Some(lease) = lease {
+    let store = Installations::new(home);
+    tokio::task::spawn_blocking(move || {
+      store
+        .updater_selection()
+        .map(|selection| selection.filter(|selection| selection.content_id == lease.content_id()))
+    })
+    .await
+    .map_err(CommandErrorDto::backend)?
+    .map_err(CommandErrorDto::backend)?
+  } else {
+    None
+  };
+  let (channel, source_revision) = selection.map_or((None, None), |selection| {
+    (
+      selection.origin.map(|origin| origin.channel),
+      selection.build.source_revision,
+    )
+  });
+  Ok(UpdaterBuildInfo {
+    version,
+    channel,
+    source_revision,
+  })
 }
 
 async fn read_version(path: &Path, cancelled: &watch::Receiver<bool>) -> io::Result<String> {

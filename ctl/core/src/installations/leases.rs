@@ -13,6 +13,15 @@ pub struct Lease {
   // Close the lock before trying to delete the file on Windows.
   _file: File,
   _path: LeaseFile,
+  content_id: String,
+}
+
+impl Lease {
+  /// Returns the identity of the immutable payload held by this lease.
+  #[must_use]
+  pub fn content_id(&self) -> &str {
+    &self.content_id
+  }
 }
 
 #[derive(Debug)]
@@ -57,6 +66,7 @@ pub(super) fn retain(leases: &Path, id: &str) -> io::Result<Lease> {
   Ok(Lease {
     _file: file,
     _path: LeaseFile(path),
+    content_id: id.to_owned(),
   })
 }
 

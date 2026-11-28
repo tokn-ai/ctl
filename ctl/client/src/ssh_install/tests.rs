@@ -127,6 +127,7 @@ case "$1" in
   --component-info) exit 0;;
   --version) printf 'ctlup 0.0.0\n';;
   installation-layout-version) printf '__LAYOUT_VERSION__\n';;
+  updater-channel-tracked) test -f "$HOME/tracked";;
   updater-digest)
     touch "$HOME/probed"
     if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum "$0"); else hash=$(shasum -a 256 "$0"); fi
@@ -182,6 +183,39 @@ esac
     std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
     0o700
   );
+
+  let other = b"#!/bin/sh\nexit 9\n";
+  let (status, _, _) = run_updater_command(
+    run(updater_bootstrap_script(other, true).unwrap()),
+    &[],
+    |_| {},
+  )
+  .await
+  .unwrap();
+  assert_eq!(status.code(), Some(10));
+  std::fs::remove_file(home.join("probed")).unwrap();
+  std::fs::write(home.join("tracked"), b"").unwrap();
+  let (status, stdout, stderr) = run_updater_command(
+    run(updater_bootstrap_script(other, true).unwrap()),
+    &[],
+    |_| panic!("a tracked updater should not report upload progress"),
+  )
+  .await
+  .unwrap();
+  require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
+  assert!(!home.join("probed").exists());
+  // If a channel was selected after preflight, the uploaded sidecar is unused.
+  let (status, stdout, stderr) = run_updater_command(
+    run(updater_bootstrap_script(other, false).unwrap()),
+    other,
+    |_| {},
+  )
+  .await
+  .unwrap();
+  require_updater_success(status, &stdout, &stderr, b"ctlup-bootstrap-v1\n").unwrap();
+  assert_eq!(std::fs::read(&binary).unwrap(), updater);
+  std::fs::remove_file(home.join("tracked")).unwrap();
+
   for (script, input) in [
     (
       updater_bootstrap_script(updater, false).unwrap(),

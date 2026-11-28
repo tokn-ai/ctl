@@ -1,6 +1,8 @@
 //! The updater is distributed separately from runtime bundles.
 
 use super::{AssetProgress, BundleChannel, Error, Publication, Resolver, report_progress};
+use ctl_core::component::ComponentBuildInfo;
+use ctl_core::installations::CatalogOrigin;
 use ctl_core::{bundle_layout, private_fs};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -25,6 +27,39 @@ pub struct UpdaterInfo {
 pub struct VerifiedUpdater {
   pub info: UpdaterInfo,
   pub bytes: Vec<u8>,
+}
+
+/// The updater sidecar and source build from one immutable publication.
+pub struct PublishedUpdater {
+  pub info: UpdaterInfo,
+  pub origin: CatalogOrigin,
+  pub build: ComponentBuildInfo,
+  resolver: Resolver,
+  publication: Publication,
+}
+
+/// Resolves the channel's updater without downloading executable or runtime bytes.
+/// # Errors
+/// Rejects unavailable publications, unsupported targets or invalid metadata.
+pub async fn resolve_updater(
+  channel: BundleChannel,
+  target: &str,
+) -> Result<PublishedUpdater, Error> {
+  Resolver::production()?
+    .resolve_updater(channel, target)
+    .await
+}
+
+impl PublishedUpdater {
+  /// Obtains the exact updater from this publication, using verified cached bytes if available.
+  /// # Errors
+  /// Reports unavailable or corrupt executable bytes or unsafe cache storage.
+  pub async fn download_cached(&self, cache_root: &Path) -> Result<VerifiedUpdater, Error> {
+    self
+      .resolver
+      .pinned_updater_cached(&self.publication, self.info.clone(), cache_root, None)
+      .await
+  }
 }
 
 impl UpdaterInfo {
@@ -122,6 +157,40 @@ pub async fn download_updater_cached(
 }
 
 impl Resolver {
+  pub(super) async fn resolve_updater(
+    &self,
+    channel: BundleChannel,
+    target: &str,
+  ) -> Result<PublishedUpdater, Error> {
+    let publication = self.target_publication(channel, target).await?;
+    let build = publication
+      .manifest
+      .target(target)?
+      .components
+      .as_ref()
+      .and_then(|components| components.get("ctl-agent"))
+      .ok_or_else(|| Error::Invalid("updater publication lacks source build metadata".into()))?
+      .build
+      .clone();
+    let info = self.updater_metadata(&publication, target).await?;
+    let origin = CatalogOrigin {
+      channel: channel.name().into(),
+      publication_id: publication
+        .id
+        .clone()
+        .or_else(|| Some(publication.manifest.bundle_id.clone())),
+      built_at: publication.built_at.clone(),
+    };
+    origin.validate()?;
+    Ok(PublishedUpdater {
+      info,
+      origin,
+      build,
+      resolver: self.clone(),
+      publication,
+    })
+  }
+
   pub(super) async fn updater_cached(
     &self,
     publication: &Publication,

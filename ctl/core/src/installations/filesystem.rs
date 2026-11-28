@@ -1,6 +1,7 @@
 use super::{Installations, catalog, leases};
 use crate::bundles::{Bundle, MANIFEST_FILE, local_target};
 use crate::component::ComponentBuildInfo;
+use crate::component_update::BundleChannel;
 use crate::private_fs::{self, options, sync_directory};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, Metadata};
@@ -409,62 +410,76 @@ pub(super) fn prepare_activation(store: &Installations) -> io::Result<()> {
   prepare_aliases(store, None, false)
 }
 
+pub(super) enum ManagerSelection<'a> {
+  Provision {
+    refresh_launcher: bool,
+  },
+  Track {
+    channel: BundleChannel,
+    expected: Option<&'a catalog::UpdaterSelection>,
+  },
+}
+
 pub(super) fn install_manager(
   store: &Installations,
   updater: &[u8],
   build: &ComponentBuildInfo,
   origin: Option<&catalog::CatalogOrigin>,
-  refresh_launcher: bool,
+  mode: ManagerSelection<'_>,
 ) -> io::Result<()> {
   if updater.is_empty() || updater.len() > crate::bundles::MAX_FILE_BYTES {
     return Err(invalid("invalid updater executable size"));
   }
-  if let Some(origin) = origin {
-    origin.validate()?;
-  }
+  let (tracked_channel, refresh_launcher) = match &mode {
+    ManagerSelection::Provision { refresh_launcher } => (None, *refresh_launcher),
+    ManagerSelection::Track { channel, .. } => (Some(*channel), cfg!(target_os = "macos")),
+  };
+  let mut selection = catalog::UpdaterSelection {
+    content_id: crate::bundles::digest(updater),
+    build: build.clone(),
+    origin: origin.cloned(),
+    tracked_channel,
+  };
+  selection.validate()?;
   ensure_root(store)?;
   let _lock = Lock::acquire(store)?;
   let mut state = catalog::read_index(store)?;
+  let previous = catalog::read_updater_selection(store, state.updater.as_deref())?;
+  // Runtime and checkout provisioning may supply a different updater. Keep
+  // a channel the account selected explicitly while still repairing aliases.
+  let mut retained_bytes = None;
+  match (mode, previous.as_ref()) {
+    (ManagerSelection::Track { expected, .. }, current) if current != expected => {
+      return Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "updater selection changed during preparation",
+      ));
+    }
+    (ManagerSelection::Provision { .. }, Some(current)) if current.tracked_channel.is_some() => {
+      if selection.content_id != current.content_id {
+        let (_, bytes) = read_manager(store, &state.updater_paths, &current.content_id)?
+          .ok_or_else(missing_updater)?;
+        retained_bytes = Some(bytes);
+      }
+      selection = current.clone();
+    }
+    (ManagerSelection::Provision { .. }, Some(current))
+      if selection.content_id == current.content_id
+        && selection
+          .origin
+          .as_ref()
+          .is_none_or(|origin| origin.channel == "provided")
+        && current.origin.is_some() =>
+    {
+      selection.origin.clone_from(&current.origin);
+    }
+    _ => {}
+  }
+  let id = &selection.content_id;
+  let updater = retained_bytes.as_deref().unwrap_or(updater);
   catalog::initialize(store, &state)?;
-  let root = store.manager_root();
-  ensure_directory(&root)?;
-  let id = crate::bundles::digest(updater);
-  if read_manager(store, &state.updater_paths, &id)?.is_none() {
-    let known_location = state.updater_paths.location(&id);
-    let location = if let Some(location) = known_location {
-      location.to_owned()
-    } else {
-      let label = crate::installed_build_name::label(build, origin, &id);
-      available_location(&label, &id, None, &root, |location| {
-        state.updater_paths.reserves(location)
-      })?
-    };
-    let destination = root.join(&location);
-    let destination_parent = destination.parent().unwrap();
-    let temporary = Temporary(
-      store
-        .staging_root()
-        .join(format!("updater-{}", uuid::Uuid::new_v4())),
-    );
-    ensure_directory(&temporary.0)?;
-    write(&temporary.0.join(MANAGER), updater, true)?;
-    sync_directory(&temporary.0)?;
-    if known_location.is_none() {
-      state
-        .updater_paths
-        .object
-        .locations
-        .insert(id.clone(), location);
-      catalog::commit_updater_object_paths(store, &state.updater_paths.object)?;
-    }
-    ensure_directory(destination_parent)?;
-    if path_exists(&destination)? {
-      return Err(invalid("updater payload location already exists"));
-    }
-    fs::rename(&temporary.0, &destination)?;
-    sync_directory(destination_parent)?;
-    sync_directory(&root)?;
-    sync_directory(&store.staging_root())?;
+  if retained_bytes.is_none() && read_manager(store, &state.updater_paths, id)?.is_none() {
+    publish_manager_payload(store, &mut state.updater_paths, updater, &selection)?;
   }
   let refresh =
     state.updater_paths.object.launcher_layout != Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
@@ -473,11 +488,54 @@ pub(super) fn install_manager(
     state.updater_paths.object.launcher_layout = Some(super::UPDATER_OBJECT_PATH_LAYOUT_VERSION);
     catalog::commit_updater_object_paths(store, &state.updater_paths.object)?;
   }
-  if state.updater.as_ref() != Some(&id) {
-    state.updater = Some(id);
+  if previous.as_ref() != Some(&selection) {
+    catalog::commit_updater_selection(store, previous, &selection)?;
+  }
+  if state.updater.as_ref() != Some(id) {
+    state.updater = Some(id.clone());
     catalog::commit_metadata(store, &state)?;
   }
   Ok(())
+}
+
+fn publish_manager_payload(
+  store: &Installations,
+  paths: &mut catalog::PayloadPaths,
+  updater: &[u8],
+  selection: &catalog::UpdaterSelection,
+) -> io::Result<()> {
+  let root = store.manager_root();
+  ensure_directory(&root)?;
+  let id = &selection.content_id;
+  let known_location = paths.location(id);
+  let location = if let Some(location) = known_location {
+    location.to_owned()
+  } else {
+    let label = crate::installed_build_name::label(&selection.build, selection.origin.as_ref(), id);
+    available_location(&label, id, None, &root, |location| paths.reserves(location))?
+  };
+  let destination = root.join(&location);
+  let destination_parent = destination.parent().unwrap();
+  let temporary = Temporary(
+    store
+      .staging_root()
+      .join(format!("updater-{}", uuid::Uuid::new_v4())),
+  );
+  ensure_directory(&temporary.0)?;
+  write(&temporary.0.join(MANAGER), updater, true)?;
+  sync_directory(&temporary.0)?;
+  if known_location.is_none() {
+    paths.object.locations.insert(id.clone(), location);
+    catalog::commit_updater_object_paths(store, &paths.object)?;
+  }
+  ensure_directory(destination_parent)?;
+  if path_exists(&destination)? {
+    return Err(invalid("updater payload location already exists"));
+  }
+  fs::rename(&temporary.0, &destination)?;
+  sync_directory(destination_parent)?;
+  sync_directory(&root)?;
+  sync_directory(&store.staging_root())
 }
 
 pub(super) fn manager_and_lease(
@@ -491,14 +549,16 @@ pub(super) fn manager_and_lease(
   let Some(id) = state.updater.as_deref() else {
     return Ok(None);
   };
-  let (path, _) = read_manager(store, &state.updater_paths, id)?.ok_or_else(|| {
-    io::Error::new(
-      io::ErrorKind::NotFound,
-      "selected updater payload is missing",
-    )
-  })?;
+  let (path, _) = read_manager(store, &state.updater_paths, id)?.ok_or_else(missing_updater)?;
   let lease = leases::retain(&store.manager_leases(), id)?;
   Ok(Some((path, lease)))
+}
+
+fn missing_updater() -> io::Error {
+  io::Error::new(
+    io::ErrorKind::NotFound,
+    "selected updater payload is missing",
+  )
 }
 
 pub(super) fn read_manager(

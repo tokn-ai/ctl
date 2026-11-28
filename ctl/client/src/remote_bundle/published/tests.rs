@@ -602,6 +602,57 @@ fn assert_completed_downloads(
 }
 
 #[tokio::test]
+async fn updater_resolution_pins_only_the_updater_when_the_channel_advances() {
+  let temp = crate::installation::TemporaryDirectory::new("updater-publication-test").unwrap();
+  let target = "aarch64-apple-darwin";
+  let channel_path = "/bundles/channels/nightly.json";
+  let first_revision = "a".repeat(40);
+  let second_revision = "b".repeat(40);
+  let server =
+    advancing_installation_server(channel_path, target, &first_revision, &second_revision).await;
+  let resolver = server.resolver();
+  let first = resolver
+    .resolve_updater(BundleChannel::Nightly, target)
+    .await
+    .unwrap();
+  assert_eq!(first.origin.channel, "nightly");
+  assert_eq!(first.origin.publication_id.as_deref(), Some("first"));
+  assert_eq!(
+    first.origin.built_at.as_deref(),
+    Some("2026-11-13T01:02:03Z")
+  );
+  assert_eq!(
+    first.build.source_revision.as_deref(),
+    Some(first_revision.as_str())
+  );
+  let next = resolver
+    .resolve_updater(BundleChannel::Nightly, target)
+    .await
+    .unwrap();
+  assert_eq!(next.info.git_revision, second_revision);
+  let requests = server.requests.lock().unwrap().clone();
+  assert_eq!(requests.len(), 8);
+  assert!(requests.iter().all(|path| {
+    Path::new(path)
+      .extension()
+      .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+  }));
+
+  let verified = first
+    .download_cached(&temp.0.join(".tokn/ctl/ctlup/cache/updaters"))
+    .await
+    .unwrap();
+  assert_eq!(verified.info.sha256, first.info.sha256);
+  assert_eq!(verified.bytes, b"fixture updater for first");
+  let requests = server.requests.lock().unwrap();
+  assert_eq!(requests.len(), 9);
+  assert_eq!(
+    requests[8],
+    format!("/bundles/sets/first/{}", first.info.binary)
+  );
+}
+
+#[tokio::test]
 async fn installation_download_pins_both_assets_when_the_channel_advances() {
   let temp = crate::installation::TemporaryDirectory::new("publication-test").unwrap();
   let home = &temp.0;

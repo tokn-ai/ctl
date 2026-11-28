@@ -204,6 +204,28 @@ targets without executing them. The runtime status also lists retained and
 missing builds with their source metadata. Publication IDs distinguish builds
 that share a version string.
 
+## Install or update ctlup
+
+```sh
+ctlup install updater --channel nightly
+ctlup status updater
+ctlup update updater --check
+ctlup update updater
+ctlup install updater --channel stable
+```
+
+`install updater` selects a published channel for this computer. `update
+updater` follows that selection, and `--check` reads publication metadata
+without downloading the executable. These commands leave the active runtime
+and desktop app in place. Runtime installs continue to bootstrap ctlup on
+profiles that have no explicit updater channel.
+
+`status updater` shows the selected build's version, source and tracked
+channel. Older installations may have no recorded updater source. A channel
+can be selected once it publishes a ctlup build that supports these commands.
+If the selected executable is missing, invoke `update updater` with a
+compatible standalone ctlup binary, such as one installed through Cargo.
+
 ## Install or update the desktop app
 
 ```sh

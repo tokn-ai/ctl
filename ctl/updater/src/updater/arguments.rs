@@ -33,7 +33,7 @@ pub(super) struct DestinationArguments {
 pub(super) enum Command {
   #[command(long_flag = "component-info", hide = true)]
   ComponentInfo,
-  /// Select a source and install the runtime or desktop app.
+  /// Select a source and install the runtime, desktop app or updater.
   Install(InstallArguments),
   /// Update the selected package from its tracked channel.
   Update(UpdateArguments),
@@ -113,6 +113,10 @@ pub(super) enum Command {
   MacosRuntimeSigningVersion,
   #[command(hide = true)]
   UpdaterDigest,
+  #[command(hide = true)]
+  UpdaterChannelVersion,
+  #[command(hide = true)]
+  UpdaterChannelTracked,
 }
 
 #[derive(Debug, Args)]
@@ -251,6 +255,7 @@ pub(super) enum PackageSelection {
   #[default]
   Runtime,
   App,
+  Updater,
 }
 
 #[derive(Debug, Default, Args)]

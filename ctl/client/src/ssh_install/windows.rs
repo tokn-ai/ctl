@@ -159,46 +159,59 @@ pub(super) async fn install(
   let digest = hex::encode(Sha256::digest(updater));
   let account_guard = account_guard(expected_account)?;
   let preparation = updater_preparation(origin)?;
-  let updater_staging = super::updater_staging(RemotePlatform::Windows);
-  let preflight = format!(
-    r#"$ErrorActionPreference = 'Stop'
-{account_guard}
-{updater_staging}
-$manager = Find-InstalledUpdater
-if (!$manager) {{ exit 11 }}
-if ((& $manager updater-digest) -ne '{digest}') {{ exit 11 }}
-{preparation}
-$confirmation = & $manager activate-installed '{}' @originArgs
-$code = $LASTEXITCODE
-if ($code -eq 0) {{
-  if ($confirmation -cne 'ctl-install-v1') {{ throw 'ctlup did not confirm activation.' }}
-  [Console]::Out.Write("ctl-install-v1`n")
-}}
-exit $code"#,
-    manifest.bundle_id,
-  );
+  let preflight = preflight_script(&manifest.bundle_id, &digest, &account_guard, &preparation);
   on_progress(RemoteInstallEvent::CheckingRemoteInstallation);
   let command = windows_ssh_command(destination, options, interaction, &preflight).await?;
   let (status, stdout, stderr) = run_updater_command(command, &[], |_| {}).await?;
-  let prefix = match status.code() {
+  let (prefix, require_tracked) = match status.code() {
     Some(0) => {
       require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n")?;
       on_progress(RemoteInstallEvent::Reused);
       return Ok(());
     }
-    Some(10) => &[],
-    Some(11) => updater,
+    Some(10) => (&[][..], false),
+    Some(11) => (updater, false),
+    // The runtime is missing, and the receiver can use its tracked updater.
+    Some(12) => (&[][..], true),
     _ => return require_updater_success(status, &stdout, &stderr, b"ctl-install-v1\n"),
   };
   let script = install_script(
     &digest,
     prefix.len(),
     updater.len(),
+    require_tracked,
     &account_guard,
     &preparation,
   );
   let command = windows_ssh_command(destination, options, interaction, &script).await?;
   run_package_install_with_prefix(command, prefix, archive, layout.names(), on_progress).await
+}
+
+fn preflight_script(
+  bundle_id: &str,
+  digest: &str,
+  account_guard: &str,
+  preparation: &str,
+) -> String {
+  let updater_staging = super::updater_staging(RemotePlatform::Windows);
+  format!(
+    r#"$ErrorActionPreference = 'Stop'
+{account_guard}
+{updater_staging}
+$manager = Find-InstalledUpdater
+if (!$manager) {{ exit 11 }}
+$tracked = Test-TrackedUpdater $manager
+if (!$tracked -and ((& $manager updater-digest) -ne '{digest}')) {{ exit 11 }}
+{preparation}
+$confirmation = & $manager activate-installed '{bundle_id}' @originArgs
+$code = $LASTEXITCODE
+if ($code -eq 0) {{
+  if ($confirmation -cne 'ctl-install-v1') {{ throw 'ctlup did not confirm activation.' }}
+  [Console]::Out.Write("ctl-install-v1`n")
+}}
+if ($code -eq 10 -and $tracked) {{ exit 12 }}
+exit $code"#
+  )
 }
 
 fn updater_preparation(
@@ -240,6 +253,7 @@ fn install_script(
   digest: &str,
   prefix_size: usize,
   updater_size: usize,
+  require_tracked: bool,
   account_guard: &str,
   preparation: &str,
 ) -> String {
@@ -252,6 +266,10 @@ fn install_script(
     .replace("__UPDATER_PREFIX_BYTES__", &prefix_size.to_string())
     .replace("__UPDATER_SIZE__", &updater_size.to_string())
     .replace("__UPDATER_SHA256__", digest)
+    .replace(
+      "__REQUIRE_TRACKED_UPDATER__",
+      if require_tracked { "$true" } else { "$false" },
+    )
     .replace("__UPDATE_PREPARATION__", preparation)
 }
 
@@ -267,6 +285,7 @@ mod tests {
       &"a".repeat(64),
       ctl_core::bundle_layout::MAX_FILE_BYTES,
       ctl_core::bundle_layout::MAX_FILE_BYTES,
+      false,
       &guard,
       &updater_preparation(None).unwrap(),
     );
@@ -283,15 +302,22 @@ mod tests {
       built_at: Some("2026-01-02T03:04:05.123456789Z".into()),
     };
     let guard = account_guard(Some("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa")).unwrap();
+    let digest = "a".repeat(64);
+    let preparation = updater_preparation(Some(&origin)).unwrap();
+    let preflight = preflight_script(&digest, &digest, &guard, &preparation);
+    assert!(preflight.contains("if ($code -eq 10 -and $tracked) { exit 12 }"));
+    assert!(powershell_command(&preflight).unwrap().len() < 8000);
     let script = install_script(
-      &"a".repeat(64),
+      &digest,
       0,
       ctl_core::bundle_layout::MAX_FILE_BYTES,
+      true,
       &guard,
-      &updater_preparation(Some(&origin)).unwrap(),
+      &preparation,
     );
     assert!(encoded_powershell_command(&script).len() >= 8000);
     assert!(script.contains("$remaining = 0"));
+    assert!(script.contains("if ($true) { throw 'The tracked ctlup changed during the update.' }"));
     assert!(script.contains("Copy-RetainedUpdater $stage $size $sha"));
     let command = powershell_command(&script).unwrap();
     assert!(command.len() < 8000);

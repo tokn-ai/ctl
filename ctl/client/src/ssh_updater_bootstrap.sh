@@ -12,12 +12,14 @@ updater_hash() {
 }
 if [ '__CHECK_ONLY__' = yes ]; then
   existing_updater_launcher || exit 10
-  if [ "$updater_entrypoint" != "$updater_launcher" ]; then
-    digest=$("$updater_entrypoint" updater-digest </dev/null 2>/dev/null) || exit 10
-  else
-    digest=$(updater_hash "$updater_entrypoint")
+  if ! updater_tracks_channel; then
+    if [ "$updater_entrypoint" != "$updater_launcher" ]; then
+      digest=$("$updater_entrypoint" updater-digest </dev/null 2>/dev/null) || exit 10
+    else
+      digest=$(updater_hash "$updater_entrypoint")
+    fi
+    test "$digest" = '__UPDATER_SHA256__' || exit 10
   fi
-  test "$digest" = '__UPDATER_SHA256__' || exit 10
   require_checkout_layout "$updater_entrypoint"
   printf 'ctlup-bootstrap-v1\n'
   exit 0
@@ -33,14 +35,19 @@ set +C
 received=$(wc -c < "$temporary" | tr -d '[:space:]')
 test "$received" -eq __UPDATER_BYTES__ || fail 'incomplete updater upload'
 test "$(updater_hash "$temporary")" = '__UPDATER_SHA256__' || fail 'updater checksum mismatch'
-chmod 700 "$temporary"
-# A wrong architecture or invalid executable must not replace a working updater.
-"$temporary" --component-info >/dev/null
-version=$("$temporary" --version)
-case "$version" in
-  'ctlup '*) ;;
-  *) fail 'uploaded executable is not ctlup' ;;
-esac
-require_checkout_layout "$temporary"
-"$temporary" install-manager </dev/null
+# A channel may have been selected since the upload preflight.
+if existing_updater_launcher && updater_tracks_channel; then
+  require_checkout_layout "$updater_entrypoint"
+else
+  chmod 700 "$temporary"
+  # A wrong architecture or invalid executable must not replace a working updater.
+  "$temporary" --component-info >/dev/null
+  version=$("$temporary" --version)
+  case "$version" in
+    'ctlup '*) ;;
+    *) fail 'uploaded executable is not ctlup' ;;
+  esac
+  require_checkout_layout "$temporary"
+  "$temporary" install-manager </dev/null
+fi
 printf 'ctlup-bootstrap-v1\n'

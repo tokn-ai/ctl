@@ -548,6 +548,97 @@ fn provisioning_refreshes_legacy_launchers_and_preserves_hash_payloads() {
 }
 
 #[test]
+fn updater_channel_survives_implicit_provisioning_and_rejects_stale_selection() {
+  let home = Home::new();
+  let store = home.store();
+  let build = super::super::manager_build_fixture();
+  let stable = origin("stable", "released");
+  let nightly = origin("nightly", "next");
+  let provided = origin("provided", "fallback");
+  let first = b"stable updater";
+  let second = b"nightly updater";
+
+  store.install_manager(first, &build, Some(&stable)).unwrap();
+  store
+    .install_manager(first, &build, Some(&provided))
+    .unwrap();
+  let initial = store.updater_selection().unwrap().unwrap();
+  assert_eq!(initial.origin.as_ref(), Some(&stable));
+  assert_eq!(initial.tracked_channel, None);
+
+  // Legacy profiles have a digest in installations.json and no metadata.
+  let registry_path = store.state_root().join(CATALOG);
+  let legacy_registry = fs::read(&registry_path).unwrap();
+  fs::remove_file(store.state_root().join(UPDATER_SELECTION)).unwrap();
+  assert_eq!(store.updater_selection().unwrap(), None);
+  assert_eq!(store.active_manager_id().unwrap(), Some(initial.content_id));
+  store
+    .select_manager_channel(first, &build, &stable, BundleChannel::Stable, None)
+    .unwrap();
+  assert_eq!(fs::read(&registry_path).unwrap(), legacy_registry);
+
+  let tracked = store.updater_selection().unwrap().unwrap();
+  let (_, lease) = store.manager_and_lease().unwrap().unwrap();
+  assert_eq!(lease.content_id(), tracked.content_id);
+  assert_eq!(tracked.tracked_channel, Some(BundleChannel::Stable));
+  store
+    .install_manager(second, &build, Some(&nightly))
+    .unwrap();
+  assert_eq!(store.updater_selection().unwrap().as_ref(), Some(&tracked));
+  assert!(
+    store
+      .manager_bytes(&crate::bundles::digest(second))
+      .unwrap()
+      .is_none()
+  );
+  assert_eq!(
+    store
+      .select_manager_channel(second, &build, &nightly, BundleChannel::Nightly, None)
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::WouldBlock
+  );
+
+  let next = UpdaterSelection {
+    content_id: crate::bundles::digest(second),
+    build: build.clone(),
+    origin: Some(nightly.clone()),
+    tracked_channel: Some(BundleChannel::Nightly),
+  };
+  // A process may stop after metadata is persisted and before the digest is
+  // switched. Readers and retries still resolve the original selection.
+  commit_updater_selection(&store, Some(tracked.clone()), &next).unwrap();
+  assert_eq!(store.updater_selection().unwrap().as_ref(), Some(&tracked));
+  store
+    .select_manager_channel(
+      second,
+      &build,
+      &nightly,
+      BundleChannel::Nightly,
+      Some(&tracked),
+    )
+    .unwrap();
+  assert_eq!(store.updater_selection().unwrap().as_ref(), Some(&next));
+  assert_eq!(
+    store.active_manager_id().unwrap().as_ref(),
+    Some(&next.content_id)
+  );
+  assert_eq!(
+    store
+      .select_manager_channel(
+        first,
+        &build,
+        &stable,
+        BundleChannel::Stable,
+        Some(&tracked)
+      )
+      .unwrap_err()
+      .kind(),
+    io::ErrorKind::WouldBlock
+  );
+}
+
+#[test]
 fn readable_updaters_preserve_previous_layouts_and_keep_leased_exact_bytes() {
   let home = Home::new();
   let store = home.store();

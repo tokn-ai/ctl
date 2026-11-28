@@ -1,7 +1,8 @@
 # ctlup
 
-`ctlup install` selects a source for a complete runtime bundle or the desktop
-app. `ctlup update` follows the channel recorded by the selected installation.
+`ctlup install` selects a source for a complete runtime bundle, the desktop
+app, or ctlup itself. `ctlup update` follows the channel recorded by the
+selected installation.
 Use `--host` for a saved host and `--ssh` for an SSH address or alias. Each
 profile stores installed payloads and cache files under its `ctlup/` directory.
 
@@ -9,6 +10,10 @@ profile stores installed payloads and cache files under its `ctlup/` directory.
 cargo install --locked ctlup
 ctlup --help
 ```
+
+Run `ctlup install updater --channel nightly` or `--channel stable` to select
+ctlup's own channel. Run `ctlup status updater` to see the selected build and
+`ctlup update updater` to follow that channel.
 
 For installation layouts and release channels, see the
 [component update guide](https://github.com/tokn-ai/ctl/blob/main/docs/component-updates.md).

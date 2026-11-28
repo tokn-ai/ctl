@@ -30,6 +30,10 @@ existing_updater_launcher() {
   test -x "$updater_launcher"
 }
 
+updater_tracks_channel() {
+  "$updater_entrypoint" updater-channel-tracked </dev/null >/dev/null 2>&1
+}
+
 prepare_updater_staging() {
   updater_staging="$HOME/.tokn/ctl/ctlup/staging"
   for directory in "$HOME" "$HOME/.tokn" "$HOME/.tokn/ctl" "$HOME/.tokn/ctl/ctlup" "$updater_staging"; do

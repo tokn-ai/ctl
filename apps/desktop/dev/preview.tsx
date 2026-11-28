@@ -280,8 +280,8 @@ mockIPC((command, payload) => {
     }
     case "get_desktop_build":
       return { channel: "nightly", version: sample_builds.current.version, source_revision: sample_builds.current.source_revision };
-    case "get_updater_version":
-      return "0.1.5";
+    case "get_updater_build":
+      return { version: "0.1.5", channel: "nightly", source_revision: sample_builds.current.source_revision };
     case "get_component_versions":
       return structuredClone(component_versions);
     case "preflight_component_action": {
